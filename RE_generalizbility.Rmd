@@ -1,0 +1,144 @@
+---
+title: "Generalizability Analyses"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: yes
+  html_document:
+    code_folding: show
+    toc: yes
+    toc_float: yes
+---
+
+
+```{r setup}
+library('knitr')
+opts_knit$set(root.dir = normalizePath('../Results'))
+```
+
+# Import libraries
+```{r}
+library(tidyverse)
+library(mlr)
+library(mlrCPO) 
+library(parallelMap) 
+library(skimr) 
+library(DataExplorer)
+library(ggplot2) 
+library(psych) 
+
+source("../Code/udf_custom_ranger.R") 
+source("../Code/udf_drop_constants.R") 
+```
+
+# Import Data
+```{r}
+load('../Data/Prep Data/feature_sets.RData')
+load(file = "models_trained_uni_1.RData")
+load(file = "models_trained_uni_2.RData")
+load(file = "models_trained_uni_3.RData")
+load(file = "models_trained_uni_4.RData")
+```
+
+```{r}
+df_uni_1_clean <- df_uni_1_clean %>% select(-net_dm_closeness)
+df_uni_2_clean <- df_uni_2_clean %>% select(-net_dm_closeness)
+df_uni_3_clean <- df_uni_3_clean %>% select(-net_dm_closeness)
+df_uni_4_clean <- df_uni_4_clean %>% select(-net_dm_closeness)
+```
+
+
+# Define Prediction Tasks
+```{r}
+pred_task_uni_2 = makeClassifTask("RetentionAll", 
+                                df_uni_2_clean %>% select(-user_id), 
+                                target = "status", 
+                                positive = "Transferred", 
+                                fixup.data = "no", 
+                                check.data = FALSE)
+
+pred_task_uni_1 = makeClassifTask("RetentionAll", 
+                                df_uni_1_clean %>% select(-user_id), 
+                                target = "status", 
+                                positive = "Transferred", 
+                                fixup.data = "no", 
+                                check.data = FALSE)
+
+pred_task_uni_3 = makeClassifTask("RetentionAll", 
+                                df_uni_3_clean %>% select(-user_id), 
+                                target = "status", 
+                                positive = "Transferred", 
+                                fixup.data = "no", 
+                                check.data = FALSE)
+
+pred_task_uni_4 = makeClassifTask("RetentionAll", 
+                                  df_uni_4_clean %>% select(-user_id), 
+                                  target = "status", 
+                                  positive = "Transferred", 
+                                  fixup.data = "no", 
+                                  check.data = FALSE)
+```
+
+# Make Predictions
+```{r}
+# uni_1
+gen_uni_1_uni_2_rf = predict(model_rf_all_uni_1, task = pred_task_uni_2)
+gen_uni_1_uni_3_rf = predict(model_rf_all_uni_1, task = pred_task_uni_3)
+gen_uni_1_uni_4_rf = predict(model_rf_all_uni_1, task = pred_task_uni_4)
+
+gen_uni_1_uni_2_glm = predict(model_glm_all_uni_1, task = pred_task_uni_2)
+gen_uni_1_uni_3_glm = predict(model_glm_all_uni_1, task = pred_task_uni_3)
+gen_uni_1_uni_4_glm = predict(model_glm_all_uni_1, task = pred_task_uni_4)
+```
+
+```{r}
+# uni_2
+gen_uni_2_uni_1_rf = predict(model_rf_all_uni_2, task = pred_task_uni_1)
+gen_uni_2_uni_3_rf = predict(model_rf_all_uni_2, task = pred_task_uni_3)
+gen_uni_2_uni_4_rf = predict(model_rf_all_uni_2, task = pred_task_uni_4)
+
+gen_uni_2_uni_1_glm = predict(model_glm_all_uni_2, task = pred_task_uni_1)
+gen_uni_2_uni_3_glm = predict(model_glm_all_uni_2, task = pred_task_uni_3)
+gen_uni_2_uni_4_glm = predict(model_glm_all_uni_2, task = pred_task_uni_4)
+```
+
+```{r}
+# uni_3
+gen_uni_3_uni_2_rf = predict(model_rf_all_uni_3, task = pred_task_uni_2)
+gen_uni_3_uni_1_rf = predict(model_rf_all_uni_3, task = pred_task_uni_1)
+gen_uni_3_uni_4_rf = predict(model_rf_all_uni_3, task = pred_task_uni_4)
+
+gen_uni_3_uni_2_glm = predict(model_glm_all_uni_3, task = pred_task_uni_2)
+gen_uni_3_uni_1_glm = predict(model_glm_all_uni_3, task = pred_task_uni_1)
+gen_uni_3_uni_4_glm = predict(model_glm_all_uni_3, task = pred_task_uni_4)
+```
+
+```{r}
+# uni_4
+gen_uni_4_uni_2_rf = predict(model_rf_all_uni_4, task = pred_task_uni_2)
+gen_uni_4_uni_3_rf = predict(model_rf_all_uni_4, task = pred_task_uni_3)
+gen_uni_4_uni_1_rf = predict(model_rf_all_uni_4, task = pred_task_uni_1)
+
+gen_uni_4_uni_2_glm = predict(model_glm_all_uni_4, task = pred_task_uni_2)
+gen_uni_4_uni_3_glm = predict(model_glm_all_uni_4, task = pred_task_uni_3)
+gen_uni_4_uni_1_glm = predict(model_glm_all_uni_4, task = pred_task_uni_1)
+```
+
+# Save Predictions
+```{r}
+save(gen_uni_1_uni_2_rf, gen_uni_1_uni_3_rf, gen_uni_1_uni_4_rf, 
+     gen_uni_1_uni_2_glm, gen_uni_1_uni_3_glm, gen_uni_1_uni_4_glm, 
+     file="../Results/gen_uni_1.RData")
+
+save(gen_uni_2_uni_1_rf, gen_uni_2_uni_3_rf, gen_uni_2_uni_4_rf, 
+     gen_uni_2_uni_1_glm, gen_uni_2_uni_3_glm, gen_uni_2_uni_4_glm, 
+     file="../Results/gen_uni_2.RData")
+
+save(gen_uni_3_uni_2_rf, gen_uni_3_uni_1_rf, gen_uni_3_uni_4_rf, 
+     gen_uni_3_uni_2_glm, gen_uni_3_uni_1_glm, gen_uni_3_uni_4_glm, 
+     file="../Results/gen_uni_3.RData")
+
+save(gen_uni_4_uni_2_rf, gen_uni_4_uni_3_rf, gen_uni_4_uni_1_rf, 
+     gen_uni_4_uni_2_glm, gen_uni_4_uni_3_glm, gen_uni_4_uni_1_glm, 
+     file="../Results/gen_uni_4.RData")
+```

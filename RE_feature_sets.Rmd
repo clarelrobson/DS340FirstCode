@@ -1,0 +1,165 @@
+---
+title: "Generate Feature Sets"
+output: html_notebook
+---
+
+```{r setup}
+
+library('knitr')
+opts_knit$set(root.dir = normalizePath('../Data/Prep Data'))
+
+library(tidyverse)
+
+```
+
+# Import Data
+```{r}
+df_uni_1 <- read.csv('feat_mat_uni_1.csv')
+df_uni_2 <- read.csv('feat_mat_uni_2.csv')
+df_uni_3 <- read.csv('feat_mat_uni_3.csv')
+df_uni_4 <- read.csv('feat_mat_uni_4.csv')
+
+```
+
+# Check Dimensionality
+```{r}
+dim(df_uni_4)
+dim(df_uni_3)
+dim(df_uni_2)
+dim(df_uni_1)
+```
+
+# Check Institutional features 
+```{r}
+df_uni_4 %>% select(matches('inst'))
+df_uni_1 %>% select(matches('inst'))
+df_uni_3 %>% select(matches('inst'))
+df_uni_2 %>% select(matches('inst'))
+
+df_uni_1$status %>% head(20)
+```
+
+# Quick Fixes
+```{r}
+
+df_uni_3 <- df_uni_3 %>% 
+  mutate(inst_pell_eligible = dplyr::recode(inst_pell_eligible, 
+                                            `0`='Not Pell Eligible', 
+                                            `1`='Pell Eligible'),
+         status = dplyr::recode(status, 
+                                `0`="Continued", 
+                                `1`="Transferred"))
+
+df_uni_2 <- df_uni_2 %>% dplyr::rename(inst_pell_eligible = inst_pell_eligibile)
+
+```
+
+# Combine Feature Matrices
+```{r}
+df_all <- bind_rows(df_uni_4, df_uni_3, df_uni_2, df_uni_1) %>% 
+  select(-X)
+```
+
+# Edit Data Types and Factor Levels
+```{r}
+
+df_all <- df_all %>% 
+  mutate(inst_high_school_gpa = ifelse(inst_high_school_gpa == 0, NA, inst_high_school_gpa), 
+         inst_gender =  dplyr::recode(inst_gender, "Female (F)"= "F", "Male (M)"= "M", "N"="U"),
+         inst_ethnicity = dplyr::recode(inst_ethnicity, 
+                                        "African-American (4)" = "Black/African American",
+                                        "African-American (2)" = "Black/African American",
+                                        "Black Non-Hispanic" = "Black/African American",
+                                        "Amer Indian or Alaskan Native" = "American Indian/Alaskan Native",
+                                        "American Indian/Alaska Native" = "American Indian/Alaskan Native",
+                                        "American Indian/Alaska Native (5)" = "American Indian/Alaskan Native",
+                                        "Asian (4)" = "Asian",
+                                        "Caucasian/White non-Hispanic (1)" = "White",
+                                        "White Non-Hispanic" = "White",
+                                        "Hispanic/Latino" = "Hispanic",
+                                        "Hispanic/Other (3)"="Hispanic",
+                                        "Native Hawaiian/Pacific Island (10)"="Native Hawaiian/Pacific Islander",
+                                        "Native Hawaiian/Other Pacific Islander"="Native Hawaiian/Pacific Islander",
+                                        "Pacific Islander"="Native Hawaiian/Pacific Islander",
+                                        "Non Resident Alien (7)"="Nonresident Alien",
+                                        "Non Specified"="Unknown",
+                                        "Race/Ethnicity Unknown"="Unknown",
+                                        "Not Reported"="Unknown",
+                                        "Two or more races (8)"="Two or More Races"),
+         inst_veteran = dplyr::recode(inst_veteran, 
+                                      `Active Duty/Campaign Badge Vet` = 'Active Military',
+                                      `Active Reserve` = 'Reserve',
+                                      `Inactive Reserve` = 'Reserve',
+                                      `Armed Forces Service Medal Vet` = 'Veteran',
+                                      `Veteran (VA Ineligible)` = 'Veteran',
+                                      `Veteran of the Vietnam Era` = 'Veteran',
+                                      `VietnamEra Veteran` = 'Veteran',
+                                      `Retired Military` = 'Veteran',
+                                      `PostVietnamEra Veteran` = 'Veteran',
+                                      `N/A` = 'Unknown/Other',
+                                      `Not a Veteran` = 'Unknown/Other',
+                                      `Not a Protected Veteran` = 'Unknown/Other',
+                                      `National Guard` = 'Unknown/Other',
+                                      `Not indicated` = 'Unknown/Other')) 
+
+# drop features 
+df_all <- df_all %>% 
+  select(-inst_program_information, inst_program_status)
+
+# convert to factor
+df_all <- df_all %>% mutate_if(is.character, factor)
+df_all <- df_all %>% mutate_if(is.logical, factor)
+
+# drop rows with missing retention status
+df_all <- df_all %>% filter(!is.na(status))
+
+# count NAs and zeros per row
+df_all <- df_all %>% mutate(count_na = rowSums(is.na(.)),
+                                      count_zero = rowSums(.==0, na.rm = TRUE))
+
+# calculate percentage of features with zero/no values in all features
+df_all <- df_all %>% 
+  mutate(missings_count = count_na + count_zero) %>%
+  mutate(missings_perc = missings_count/ncol(.))
+
+# exclude users for whom more than 95% of the features are 0 or missing
+df_all <- df_all %>% filter(missings_perc < .95)
+
+# get rid of helper variables again
+df_all$count_na = NULL
+df_all$count_zero = NULL
+df_all$missings_count = NULL
+df_all$missings_perc = NULL
+```
+
+# Split & Save Data by Institution 
+```{r}
+df_uni_4_clean <- df_all %>% filter(institution=="uni_4") %>% select(-institution)
+df_uni_3_clean <- df_all %>% filter(institution=="uni_3") %>% select(-institution)
+df_uni_2_clean <- df_all %>% filter(institution=="uni_2") %>% select(-institution)
+df_uni_1_clean <- df_all %>% filter(institution=="uni_1") %>% select(-institution)
+
+save(df_uni_4_clean, df_uni_3_clean, df_uni_2_clean, df_uni_1_clean, file="./feature_sets.RData")
+```
+
+# Compare Feature Sets
+```{r}
+feat_all <- unique(c(names(df_uni_4), names(df_uni_1), names(df_uni_3), names(df_uni_2)))
+
+setdiff(feat_all, names(df_uni_4))
+setdiff(feat_all, names(df_uni_1))
+setdiff(feat_all, names(df_uni_3))
+setdiff(feat_all, names(df_uni_2))
+
+setdiff(names(df_uni_1), names(df_uni_4))
+setdiff(names(df_uni_1), names(df_uni_3))
+setdiff(names(df_uni_1), names(df_uni_2))
+
+setdiff(names(df_uni_3), names(df_uni_1))
+setdiff(names(df_uni_3), names(df_uni_4))
+setdiff(names(df_uni_3), names(df_uni_2))
+
+setdiff(names(df_uni_2), names(df_uni_1))
+setdiff(names(df_uni_2), names(df_uni_3))
+setdiff(names(df_uni_2), names(df_uni_4))
+```

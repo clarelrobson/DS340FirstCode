@@ -1,0 +1,405 @@
+---
+title: "Compile Results"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: yes
+  html_document:
+    code_folding: show
+    toc: yes
+    toc_float: yes
+---
+
+
+```{r setup}
+library('knitr')
+opts_knit$set(root.dir = normalizePath('../Results'))
+```
+
+# Load Libraries
+```{r}
+library(tidyverse)
+library(mlr)
+library(mlrCPO) 
+library(parallelMap)
+library(skimr) 
+library(DataExplorer)
+library(ggplot2)
+library(psych)
+
+source("../Code/udf_custom_ranger.R") 
+source("../Code/udf_drop_constants.R") 
+```
+
+# Load Benchmarking Results
+```{r}
+load(file = "benchmark_uni_1.RData")
+load(file = "benchmark_uni_2.RData")
+load(file = "benchmark_uni_3.RData")
+load(file = "benchmark_uni_4.RData")
+```
+
+```{r}
+load(file = '../Data/Prep Data/feature_sets.RData')
+```
+
+# Correlation analysis
+```{r}
+library(mltools)
+library(data.table)
+
+
+cor_ranking <-  function(data){
+  
+nearzerovar = data %>% caret::nearZeroVar(freqCut = 90, names=T)
+
+
+data %>% select(-user_id) %>% 
+  select(-nearzerovar) %>%
+  impute(classes = list(numeric = imputeMedian(), integer = imputeMedian(), factor = imputeMode())) %>% .$data %>%
+  #select_if(~ sum(is.na(.))<nrow(data)*0.5) %>%
+  as.data.table() %>% 
+  one_hot() %>% 
+  cor(use = "pairwise.complete.obs") %>% as.data.frame() %>% 
+  select(status_Continued) %>% 
+  arrange(status_Continued)
+  
+}
+
+cor_rank_uni_2 <- cor_ranking(df_uni_2_clean)
+cor_rank_uni_3 <- cor_ranking(df_uni_3_clean)
+cor_rank_uni_1 <- cor_ranking(df_uni_1_clean)
+cor_rank_uni_4 <- cor_ranking(df_uni_4_clean)
+
+save(cor_rank_uni_2, cor_rank_uni_3, cor_rank_uni_1, cor_rank_uni_4, file = "../Results/cor_rank.RData")
+```
+
+
+# Benchmarking results
+#### Performance
+```{r}
+bmr_list <- list(bmr_uni_2, bmr_uni_1, bmr_uni_3, bmr_uni_4)
+bmr_names <- list('uni_2', 'uni_1', 'uni_3', 'uni_4')
+
+for(i in 1:length(bmr_list)){
+  
+  bmr <- bmr_list[[i]]
+  name <- bmr_names[i]
+  
+  bmr_res <- getBMRAggrPerformances(bmr, as.df = TRUE)
+  write.csv(bmr_res, paste0("./Tables/bmr_res_", name, ".csv"))
+  
+  png(paste0("./Plots/plt_bmr_", name, "_F1.png"))
+  plt_bmr_F1 <- plotBMRSummary(bmr, measure = f1, pretty.names = F) 
+  plt_bmr_F1$labels$x = "F1 Score (test mean)"
+  dev.off()
+  
+  png(paste0("./Plots/plt_bmr_", name, "_TPR.png"))
+  plt_bmr_TPR <- plotBMRSummary(bmr, measure = tpr, pretty.names = F) 
+  plt_bmr_TPR$labels$x = "True positive rate (test mean)"
+  dev.off()
+  
+  png(paste0("./Plots/plt_bmr_", name, "_TNR.png"))
+  plt_bmr_TNR <- plotBMRSummary(bmr, measure = tnr, pretty.names = F) 
+  plt_bmr_TNR$labels$x = "True negative rate (test mean)"
+  dev.off()
+  
+  png(paste0("./Plots/plt_bmr_", name, "_AUC.png"))
+  plt_bmr_AUC <- plotBMRSummary(bmr, measure = auc, pretty.names = F) 
+  plt_bmr_AUC$labels$x = "Area under the Curve (test mean)"
+  dev.off()
+  
+  # Plot performance measures for each learner
+  png(paste0("./Plots/bxplt_bmr_", name, "_F1.png"))
+  bxplt_bmr_F1 <- plotBMRBoxplots(bmr, measure = f1, pretty.names = F) + 
+    ylab("F1 Score") + theme_bw() + 
+    theme(axis.text.x = element_text(angle = 20, hjust = 1))
+  dev.off()
+  
+  png(paste0("./Plots/bxplt_bmr_", name, "_TPR.png"))
+  bxplt_bmr_TPR <- plotBMRBoxplots(bmr, measure = tpr, pretty.names = F) + 
+    ylab("True positive rate") + theme_bw() + 
+    theme(axis.text.x = element_text(angle = 20, hjust = 1))
+  dev.off()
+  
+  png(paste0("./Plots/bxplt_bmr_", name, "_TNR.png"))
+  bxplt_bmr_TNR <- plotBMRBoxplots(bmr, measure = tnr, pretty.names = F) + 
+    ylab("True negativ rate") + theme_bw() + 
+    theme(axis.text.x = element_text(angle = 20, hjust = 1))
+  dev.off()
+  
+  png(paste0("./Plots/bxplt_bmr_", name, "_AUC.png"))
+  bxplt_bmr_AUC <- plotBMRBoxplots(bmr, measure = auc, pretty.names = F) + 
+    ylab("Area under the Curve") + theme_bw() + 
+    theme(axis.text.x = element_text(angle = 20, hjust = 1))
+  dev.off()
+  
+  # violin plot for benchmark
+  png(paste0("./Plots/violin_bmr_", name, ".png"))
+  plotBMRBoxplots(bmr, measure = f1, style = "violin", pretty.names = FALSE,
+    order.lrn = getBMRLearnerIds(bmr)) +
+    aes(color = learner.id) +
+    theme(strip.text.x = element_text(size = 8)) + 
+    theme_bw() + theme(axis.text.x = element_text(angle = 20, hjust = 1))
+  dev.off()
+    
+}
+
+```
+
+#### Confusion matrices
+```{r}
+
+bmr_list <- list(bmr_uni_2, bmr_uni_1, bmr_uni_3, bmr_uni_4)
+bmr_names <- list('uni_2', 'uni_1', 'uni_3', 'uni_4')
+
+for(i in 1:length(bmr_list)){
+  
+  bmr <- bmr_list[[i]]
+  name <- bmr_names[i]
+
+  # Random Forest
+  Pred_bmr_RF_Inst <- getBMRPredictions(bmr, task.ids = "RetentionInst",
+                                        learner.ids = "Random Forest", 
+                                        drop= TRUE) # get predictions from benchmark
+  
+  # columns represent predicted and the rows true class labels
+  Confusion_RF_Inst <- calculateConfusionMatrix(Pred_bmr_RF_Inst, 
+                                                relative = TRUE) 
+  
+  Pred_bmr_RF_Engagement <- getBMRPredictions(bmr, task.ids = "RetentionEngagement",
+                                              learner.ids = "Random Forest", 
+                                              drop= TRUE)
+  
+  Confusion_RF_Engagement <- calculateConfusionMatrix(Pred_bmr_RF_Engagement, 
+                                                      relative = TRUE)
+  
+  Pred_bmr_RF_all <- getBMRPredictions(bmr, task.ids = "RetentionAll",
+                                       learner.ids = "Random Forest", 
+                                       drop= TRUE)
+  
+  Confusion_RF_all <- calculateConfusionMatrix(Pred_bmr_RF_all, 
+                                               relative = TRUE)
+  
+  # GLM
+  Pred_bmr_GLM_Inst <- getBMRPredictions(bmr, task.ids = "RetentionInst",
+                                         learner.ids = "GLM eNet", 
+                                         drop= TRUE)
+  
+  Confusion_GLM_Inst <- calculateConfusionMatrix(Pred_bmr_GLM_Inst, 
+                                                 relative = TRUE)
+  
+  Pred_bmr_GLM_Engagement <- getBMRPredictions(bmr, task.ids = "RetentionEngagement",
+                                               learner.ids = "GLM eNet", 
+                                               drop= TRUE)
+  
+  Confusion_GLM_Engagement <- calculateConfusionMatrix(Pred_bmr_GLM_Engagement, 
+                                                       relative = TRUE)
+  
+  Pred_bmr_GLM_all <- getBMRPredictions(bmr, task.ids = "RetentionAll",
+                                        learner.ids = "GLM eNet", 
+                                        drop= TRUE)
+  
+  Confusion_GLM_all <- calculateConfusionMatrix(Pred_bmr_GLM_all, 
+                                                relative = TRUE)
+
+  write.csv(Confusion_RF_Inst$result, 
+            paste0("Tables/Confusion_RF_Inst_", name, ".csv"))
+  
+  write.csv(Confusion_RF_Engagement$result, 
+            paste0("Tables/Confusion_RF_Engagement_", name, ".csv"))
+  
+  write.csv(Confusion_RF_all$result, 
+            paste0("Tables/Confusion_RF_all_", name, ".csv"))
+  
+  write.csv(Confusion_GLM_Inst$result, 
+            paste0("Tables/Confusion_GLM_Inst_", name, ".csv"))
+  
+  write.csv(Confusion_GLM_Engagement$result, 
+            paste0("Tables/Confusion_GLM_Engagement_", name, ".csv"))
+  
+  write.csv(Confusion_GLM_all$result, 
+            paste0("Tables/Confusion_GLM_all_", name, ".csv"))
+}
+```
+
+#### Ranks
+```{r}
+# get learner ranks according to performance
+ranks_byF1 <- convertBMRToRankMatrix(bmr, f1)
+
+# for F1
+plt_bmr_ranks_tile <- plotBMRRanksAsBarChart(bmr, pos = "tile", order.lrn = getBMRLearnerIds(bmr), 
+                                             measure = f1, pretty.names = F) + theme_bw()
+
+plt_bmr_ranks_stack <- plotBMRRanksAsBarChart(bmr, order.lrn = getBMRLearnerIds(bmr), 
+                                              measure = f1, pretty.names = F) + theme_bw()
+
+plt_bmr_ranks_dodge <- plotBMRRanksAsBarChart(bmr, pos = "dodge", order.lrn = getBMRLearnerIds(bmr), 
+                                              measure = f1, pretty.names = F) + theme_bw()
+```
+
+#### Decision Thresholds
+```{r}
+# Decision thresholds
+# plot of performance as function of the decision threshold
+bmr_thresh <- generateThreshVsPerfData(bmr, measures = list(tpr, tnr, f1)) #set aggregate = FALSE to see all curves in plots
+
+png("plt_dthresh_bmr.png")
+plot_thresh <- plotThreshVsPerf(bmr_thresh)
+# Rename and reorder factor levels
+plot_thresh + xlab("Decision threshold") + ylab("Performance") + theme(legend.position = "right") + theme_bw()
+dev.off()
+```
+
+
+# Feature Importance
+```{r}
+load(file = "../Results/models_trained_uni_1.RData")
+load(file = "../Results/models_trained_uni_2.RData")
+load(file = "../Results/models_trained_uni_3.RData")
+load(file = "../Results/models_trained_uni_4.RData")
+
+```
+
+
+```{r}
+glm_list <- list(model_glm_all_uni_2, model_glm_all_uni_3, model_glm_all_uni_4,
+                 model_glm_all_uni_1, model_glm_e_uni_2, model_glm_e_uni_3, 
+                 model_glm_e_uni_4, model_glm_e_uni_1, model_glm_inst_uni_2,
+                 model_glm_inst_uni_3, model_glm_inst_uni_4, model_glm_inst_uni_1)
+                 
+rf_list <-  list(model_rf_all_uni_2, model_rf_all_uni_3, model_rf_all_uni_4, 
+                 model_rf_all_uni_1, model_rf_e_uni_2, model_rf_e_uni_3, 
+                 model_rf_e_uni_4, model_rf_e_uni_1, model_rf_inst_uni_2, 
+                 model_rf_inst_uni_3, model_rf_inst_uni_4, model_rf_inst_uni_1)
+
+glm_names <- list("model_glm_all_uni_2", "model_glm_all_uni_3", "model_glm_all_uni_4",
+                 "model_glm_all_uni_1", "model_glm_e_uni_2", "model_glm_e_uni_3", 
+                 "model_glm_e_uni_4", "model_glm_e_uni_1", "model_glm_inst_uni_2",
+                 "model_glm_inst_uni_3", "model_glm_inst_uni_4", "model_glm_inst_uni_1")
+                 
+rf_names <- list("model_rf_all_uni_2", "model_rf_all_uni_3", "model_rf_all_uni_4", 
+                 "model_rf_all_uni_1", "model_rf_e_uni_2", "model_rf_e_uni_3", 
+                 "model_rf_e_uni_4", "model_rf_e_uni_1", "model_rf_inst_uni_2", 
+                 "model_rf_inst_uni_3", "model_rf_inst_uni_4", "model_rf_inst_uni_1")
+
+
+
+for(i in 1:length(rf_list)){
+  
+  model <- rf_list[[i]]
+  name <- rf_names[i]
+  
+  # model with institutional data
+  imp <- getFeatureImportance(model)$res # Variable importance
+  imp <- imp %>% arrange(desc(importance))
+  top_imp <- imp %>% arrange(desc(importance)) %>% top_n(., n = 10)
+  
+  top_imp$variable <- factor(top_imp$variable, levels = top_imp$variable[order(top_imp$importance)]) 
+  png(paste0("Plots/plt_top_imp", name, ".png"), width = 620, height = 420, res = 80)
+  top_imp %>%  
+    ggplot(mapping = aes(x = importance, y = variable)) +
+    geom_bar(stat="identity") + theme_bw() + labs(x = "Importance", y = "Feature")
+  dev.off()
+
+  write.csv(imp, paste0("Tables/imp_", name, ".csv"))
+}
+
+for(i in 1:length(glm_list)){
+  
+  model <- glm_list[[i]]
+  name <- glm_names[i]
+  
+  # model with institutional data
+  mod <- getLearnerModel(model, more.unwrap = TRUE) #get underlying model of learner
+  mod_coefs <- coef(mod) #extract model coefficients
+  mod_coefs <- data.frame(predict_names = rownames(mod_coefs), #extracting the rownames and matrix values
+                          coef_vals = matrix(mod_coefs))
+  
+  mod_coefs <- mod_coefs %>% arrange(desc(abs(coef_vals)))
+
+write.csv(mod_coefs, paste0("Tables/imp_", name, ".csv"))
+}
+
+```
+
+
+# Generalizability 
+
+```{r}
+load('../Data/Prep Data/feature_sets.RData')
+
+load("gen_uni_1.RData")
+load("gen_uni_2.RData")
+load("gen_uni_3.RData")
+load("gen_uni_4.RData")
+```
+
+
+## Performance evaluation
+```{r}
+eval_msrs <- list(f1, auc, tpr, tnr)
+
+gen_list <- list(gen_uni_1_uni_2_rf, gen_uni_1_uni_3_rf, gen_uni_1_uni_4_rf,
+     gen_uni_1_uni_2_glm, gen_uni_1_uni_3_glm, gen_uni_1_uni_4_glm,
+     gen_uni_2_uni_1_rf, gen_uni_2_uni_3_rf, gen_uni_2_uni_4_rf,
+     gen_uni_2_uni_1_glm, gen_uni_2_uni_3_glm, gen_uni_2_uni_4_glm,
+     gen_uni_3_uni_2_rf, gen_uni_3_uni_1_rf, gen_uni_3_uni_4_rf,
+     gen_uni_3_uni_2_glm, gen_uni_3_uni_1_glm, gen_uni_3_uni_4_glm,
+     gen_uni_4_uni_2_rf, gen_uni_4_uni_3_rf, gen_uni_4_uni_1_rf,
+     gen_uni_4_uni_2_glm, gen_uni_4_uni_3_glm, gen_uni_4_uni_1_glm)
+
+gen_names <- list("gen_uni_1_uni_2_rf", "gen_uni_1_uni_3_rf", "gen_uni_1_uni_4_rf",
+     "gen_uni_1_uni_2_glm", "gen_uni_1_uni_3_glm", "gen_uni_1_uni_4_glm",
+     "gen_uni_2_uni_1_rf", "gen_uni_2_uni_3_rf", "gen_uni_2_uni_4_rf",
+     "gen_uni_2_uni_1_glm", "gen_uni_2_uni_3_glm", "gen_uni_2_uni_4_glm",
+     "gen_uni_3_uni_2_rf", "gen_uni_3_uni_1_rf", "gen_uni_3_uni_4_rf",
+     "gen_uni_3_uni_2_glm", "gen_uni_3_uni_1_glm", "gen_uni_3_uni_4_glm",
+     "gen_uni_4_uni_2_rf", "gen_uni_4_uni_3_rf", "gen_uni_4_uni_1_rf",
+     "gen_uni_4_uni_2_glm", "gen_uni_4_uni_3_glm", "gen_uni_4_uni_1_glm")
+
+for(i in 1:length(gen_list)){
+  
+  gen <- gen_list[[i]]
+  name <- gen_names[i]
+
+  conf_mat <- calculateConfusionMatrix(gen, relative = TRUE)
+  performance_df <- as.data.frame(performance(gen, measures = eval_msrs))
+  
+  
+  write.csv(performance_df, paste0("Tables/perf_", name,".csv"))
+  write.csv(conf_mat$result, paste0("Tables/conf_mat_", name,".csv"))
+  write.csv(conf_mat$relative.row, paste0("Tables/conf_mat_rel_row", name,".csv"))
+  write.csv(conf_mat$relative.col, paste0("Tables/conf_mat_rel_col", name,".csv"))
+  
+}
+```
+
+
+```{r}
+library(mltools)
+```
+
+```{r}
+df_gen <- data.frame(matrix(ncol = 5, nrow = 0))
+
+for(i in 1:length(gen_list)){
+  
+  gen <- gen_list[[i]]
+  name <- gen_names[i] %>% as.character()
+
+  res_f1 <- mlr::performance(gen, mlr::f1)
+  res_auc <- mlr::performance(gen, mlr::auc)
+  res_tpr <- mlr::performance(gen, mlr::tpr)
+  res_tnr <- mlr::performance(gen, mlr::tnr)
+  
+  df_gen <- rbind(df_gen, c(name, res_f1, res_auc, res_tpr, res_tnr))
+}
+
+names(df_gen) <- c('model', 'f1', 'auc', 'tpr', 'tnr')
+```
+
+```{r}
+save(df_gen, file='../Results/gen_summary.RData')
+```

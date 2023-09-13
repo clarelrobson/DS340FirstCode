@@ -1,0 +1,2292 @@
+---
+title: "Retention Project | Feature extraction uni_1"
+output:
+  html_document:
+    code_folding: show
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    latex_engine: xelatex
+    toc: yes
+---
+
+
+# Loading Packages and Data
+```{r setup, include=FALSE}
+
+library('knitr')
+opts_knit$set(root.dir = normalizePath('../Data/Raw Data/uni_1'))
+
+```
+
+
+```{r include=FALSE}
+library(tidyverse) # Data Science, set of packages
+library(magrittr) # set of operators which promote semantics
+library(lubridate) # parse and manipulate dates
+library(tidytext) # tidy text analyses
+library(naniar) # handle missing values
+library(expss) # e.g., ::count_if row fulfills condition
+library(e1071) # descriptives, e.g., ::kurtosis, ::skewness
+library(Amelia) # multiple imputation of incomplete multivariate data
+library(entropy) # entropy
+library(stats) # linear regression
+library(GGally) # plot coefficients of a model, e.g., ::ggpairs
+library(rio)
+library(tidyverse)
+library(tidygraph)
+library(igraph)
+library(visNetwork)
+library(ggraph)
+
+```
+
+```{r}
+app_session <- read_csv("app_session.csv")
+campus_event <- read_csv("campus_event.csv")
+campus_event_attendance <- read_csv("campus_event_attendance.csv")
+campus_wall_post <- read_csv("campus_wall_post.csv")
+campus_wall_post_like <- read_csv("campus_wall_post_like.csv")
+campus_wall_comment <- read_csv("campus_wall_comment.csv")
+campus_wall_comment_like <- read_csv("campus_wall_comment_like.csv")
+social_group_member <- read_csv("social_group_member.csv")
+social_group_post <- read_csv("social_group_post.csv")
+social_group_post_like <- read_csv("social_group_post_like.csv")
+social_group_comment <- read_csv("social_group_comment.csv")
+social_group_comment_like <- read_csv("social_group_comment_like.csv")
+chat_message <- read_csv("chat_message.csv")
+clicked_campus_guide_tab <- read_csv("clicked_campus_guide_tab.csv")
+clicked_community_tab <- read_csv("clicked_community_tab.csv")
+clicked_home_tab <- read_csv("clicked_home_tab.csv")
+clicked_notifications_tab <- read_csv("clicked_notifications_tab.csv")
+clicked_profile_tab <- read_csv("clicked_profile_tab.csv")
+clicked_tile <- read_csv("clicked_tile.csv")
+download_and_registration <- read_csv("download_and_registration.csv")
+friend_request <- read_csv("friend_request.csv")
+orientation_event_attendance <- read_csv("orientation_event_attendance.csv")
+performed_search <- read_csv("performed_search.csv")
+service_attendance <- read_csv("service_attendance.csv")
+user_added_course <- read_csv("user_added_course.csv")
+user_campus_event <- read_csv("user_campus_event.csv")
+viewed_campus_event <- read_csv("viewed_campus_event.csv")
+viewed_club <- read_csv("viewed_club.csv")
+viewed_user_profile <- read_csv("viewed_user_profile.csv")
+retention <- read_csv("user_retention_data.csv")
+```
+
+
+# Functions
+```{r functions}
+# first overview of data strcture and check for missing data
+check_df <- function(df) {
+  head <- head(df)
+  structure <- str(df)
+  summary <- summary(df)
+  colsums <- colSums(is.na(df))
+  return(list(head, structure, summary, colsums))
+}
+
+
+# Prepare data for freshmen analyses only: in our analyses we only want to include data from a students first term. Therefore, we will need to filter all dfs by dates that lie in the respective student's first term
+## 1. Join df with retention_subset
+join_df_retention <- function(df, join_by) {
+  inner_join(retention_subset, df, by = join_by) #include object "retention_subset" directly in function as it will always need to be the same
+}
+## 2. Add column to df automatically, classifiying each row as "firstterm" and "not firstterm" to see whether the date_created lies in the respective first term of the student
+mutate_var_in_firstterm <- function(df, date) {
+  date <- enquo(date) #returns value as a quosure
+ feat_df <- df %>%
+  mutate(in_firstterm = case_when(term_of_admission == "Fall 2018" & !!date >= ymd(20180820) & !!date <= ymd(20181220) ~ "firstterm",#!! used to unquote an input so that it’s evaluated, not quoted
+                                  term_of_admission == "Fall 2019" & !!date >= ymd(20190820) & !!date <= ymd(20191220) ~ "firstterm",
+                                  TRUE ~ "not firstterm"))
+ feat_df$in_firstterm <- as.factor(feat_df$in_firstterm)
+ return(feat_df)
+}
+
+
+# Extract slopes from linear regression to represent the change of a certain app use behavior over time
+my.slopeExtraction <- function(df, date_var, feat_name) {
+  date_var <- enquo(date_var)
+  df %>%
+  mutate(Date = as.Date(!!date_var)) %>% #turn into date
+  group_by(user_id, Date) %>% # group by user and day
+  summarize(count = n()) %>% #calculate variable per user per day
+  complete(Date = seq.Date(min(Date), max(Date), by = "day")) %>% # insert missing dates
+  mutate(count = replace_na(count, 0)) %>%
+  split(.$user_id) %>%
+  map(~ lm(count ~ Date, data = .)) %>% #calculate one regression per user
+  map(coef) %>% # get coefficients of each individual model
+  map_dbl("Date") %>% # extract only the "day" coefficient/slope for each model, ignore intercept
+  as.data.frame() %>% # turn into data frame so that each user_id has their own coefficient
+  rownames_to_column('user_id') %>% # recreate user_id column
+  rename(!!quo_name(feat_name) := ".") # needed to accept string from function input
+}
+
+
+# check data for outliers by ploting a histogram
+hist_outliers <- function(df, var, outlier_cutoff, bin_size, xlab = waiver(), title = NULL) {
+  var <- enquo(var)
+  df %>%
+    filter(!!var > outlier_cutoff) %>%
+    ggplot(.) +
+    geom_histogram(mapping = aes(x = !!var, fill = !!var), binwidth = bin_size) +
+    labs(x = xlab, title = title) +
+    theme(panel.background = element_rect("white"),  panel.grid.major.y = element_line("lightgrey"))
+}
+
+# check data for outliers by ploting a boxplot
+box_outliers <- function(df, var, xlab = waiver(), title = NULL) {
+  var <- enquo(var)
+  df %>%
+    ggplot(mapping = aes(x = !!var, fill = !!var)) +
+    stat_boxplot(geom="errorbar", width=0.3) +
+    geom_boxplot(fill="turquoise4", outlier.color = "turquoise4", outlier.size=2, outlier.shape = 8, outlier.alpha = 0.1) +
+    labs(x = xlab, title = title) +
+    theme(panel.background = element_rect("white"),  panel.grid.major.y = element_line("lightgrey")) +
+    coord_flip() + scale_y_discrete()
+}
+
+# prevent max/min to return -Inf/Inf when all cases are NA
+my.max <- function(x) ifelse(!all(is.na(x)), max(x, na.rm=T), NA)
+my.min <- function(x) ifelse(!all(is.na(x)), min(x, na.rm=T), NA)
+```
+
+# Prepare institutional data
+The institutional data looks different for each university. To make it easily comparable and enable a joint analysis with other data, the variable naming and factor coding is aligned with the first university.
+
+```{r}
+
+retention <- retention %>%
+  rename("gender" = "gender_a_(legal_sex)") %>%
+  mutate(status = dplyr::recode(status,
+                                'Dropped out' = "Transferred",
+                                'Retained' = "Continued"),
+         gender = dplyr::recode(gender, 
+                                'F' = "Female (F)",
+                                'M' = "Male (M)"),
+         athlete = dplyr::recode(athlete,
+                                 'Y' = "Athlete this Term",
+                                 'N' = "Never an Athlete"),
+         living_in_residence = dplyr::recode(living_in_residence,
+                                             'R' = "Yes",
+                                             'C' = "No"),
+         program_status = dplyr::recode(program_status,
+                                        'F' = "Fulltime",
+                                        'P' = "Parttime"),
+         in_state = dplyr::recode(in_state,
+                                  'Y' = "Yes",
+                                  'N' = "No"),
+         ethnicity = dplyr::recode(ethnicity,
+                                   'White' = "Caucasian/White non-Hispanic (1)",
+                                   'American Indian or Alaska Native' = "American Indian/Alaska Native (5)",
+                                   'Asian' = "Asian (4)",
+                                   'Black or African American' = "African-American (2)",
+                                   'Hispanics of any race' = "Hispanic/Other (3)",
+                                   'Nonresident Alien' = "Non Resident Alien (7)",
+                                   'Two or more races' = "Two or more races (8)"))
+
+retention <- replace_with_na_at(retention,
+                 "living_in_residence",
+                 condition = ~.x == "W") #we do not know whether they lived in residence or commuted
+
+# remove users for whom we do not have the term of admission
+# remove users with user_id = 0, those did not use the app at all and could therefore not be matched to the app use data
+retention_clean <- retention %>% filter(!is.na(term_of_admission)) %>% distinct() %>% filter(user_id != 0)
+# remove rows with duplicate user_ids, they are enrolled in several programs
+retention_clean <- retention_clean[!duplicated(retention_clean$user_id),]
+
+# Creating a subset of retention df to have an overview of user_ids plus their terms of admission
+retention_subset <- retention_clean %>%
+  select(user_id, term_of_admission)
+```
+
+
+# Feature extraction
+
+## Institutional data
+
+Feature extraction:
+```{r feat ret}
+feat_ret_f <- retention_clean %>%
+  group_by(user_id) %>% 
+  summarize(status,
+            inst_cumulative_gpa = cumulative_gpa,
+            inst_gender = gender,
+            inst_living_in_residence = living_in_residence,
+            inst_athlete = athlete,
+            inst_ethnicity = ethnicity,
+            inst_spiritual_identity = spiritual_identity,
+            inst_in_state = in_state,
+            inst_program_status = program_status,
+            inst_international_student = international_student)
+```
+
+## App usage data
+## Single data sets
+### App session
+
+Classification of logs as during or outside of first term:
+```{r joint set term app sess}
+# Create a joint data set for app_session and retention containing all user_ids
+app_session_retention <- inner_join(retention_subset, app_session, by = 'user_id')
+# Add column classifying each row into firstterm and not firstterm
+app_session_first <- mutate_var_in_firstterm(app_session_retention, app_open_time)
+```
+Preparation of the data set:
+```{r preparation app session, include=FALSE}
+# Preparation of app session data set
+app_session_first <- app_session_first %>%
+  filter(app_open_time > ymd(20180101),
+         app_close_time > ymd(20180101)) %>% # app was only launched in 2018, dates before 2018 are unvalid
+  mutate(app_open_date = as.Date(app_open_time),
+         app_close_date = as.Date(app_close_time),
+         app_open_weekdays = wday(app_open_time, week_start = getOption("lubridate.week.start", 7)), #add column identifying the weekdays of use (0-7 starting on Sunday)
+         sess_duration = as.numeric(difftime(app_close_time, app_open_time, units = "secs"))) %>% # calculate each session's duration
+  mutate(sess_duration = replace(sess_duration, which(sess_duration < 0), NA)) %>% # replace negative session durations with NA as app_close_time was unvalid and we have no information about the actual duration
+  mutate(app_before_firstterm = case_when( #create column that categorizes each session according to whether that session was before the respective student's first term start
+    term_of_admission == "Fall 2018" & app_open_time < ymd(20180820) ~ "TRUE",#i.e. if a student was admitted in fall 2018 and used the app before the start of term 2018, he/she gets a TRUE
+    term_of_admission == "Fall 2019" & app_open_time < ymd(20190820) ~ "TRUE",
+    TRUE ~ "FALSE")) %>%
+  mutate(app_first_winter = case_when( #create column that categorizes each session according to whether that session was during the respective student's first winter break
+    term_of_admission == "Fall 2018" & app_open_time > ymd(20181220) & app_open_time < ymd(20190125) ~ "TRUE",#i.e. if a student was admitted in fall 2018 and used the app after end of the frist term and before the start of the second term, he/she gets a TRUE
+    term_of_admission == "Fall 2019" & app_open_time > ymd(20191220) & app_open_time < ymd(20200125) ~ "TRUE",
+    TRUE ~ "FALSE"))
+
+app_session_first$app_before_firstterm <- as.factor(app_session_first$app_before_firstterm)
+app_session_first$app_first_winter <- as.factor(app_session_first$app_first_winter)
+```
+
+Feature extraction:
+```{r feature app session}
+feat_app_sess_f <- app_session_first %>%
+  filter(in_firstterm == "firstterm") %>% #as in the df app_session_first all sessions are still included, we need to filter for the ones in the first term to get the measures only for that time
+  group_by(user_id) %>% #per person
+  arrange(app_open_time) %>% # sort by app open time to calculate time span
+  mutate(time_gap = as.numeric(app_open_time - lag(app_open_time), units = 'secs')) %>% # calculate time span between two logs for each user
+  summarize(ae_total_app_used_days = n_distinct(app_open_date, na.rm = T), #total number of different days app was used
+            ae_total_sess = n(), # total number of sessions
+            ae_total_sess_dur = sum(sess_duration, na.rm = T), # total time in app
+            ae_mean_sess_dur = mean(sess_duration, na.rm = T), # mean duration of a session
+            ae_sd_sess_dur = sd(sess_duration, na.rm = T), # sd of duration of a session
+            ae_max_sess_dur = my.max(sess_duration), # maximum of session duration
+            ae_min_sess_dur = my.min(sess_duration), # minimum of session duration
+            ae_IQR_sess_dur = IQR(sess_duration, na.rm = T), # IQR of session duration
+            ae_skew_sess_dur = skewness(sess_duration, na.rm = T), # skewness of session duration
+            ae_kurt_sess_dur = kurtosis(sess_duration, na.rm = T), # kurtosis of session duration
+            ae_mean_time_between_sess = mean(time_gap, na.rm = T), # mean time passed between two sessions
+            ae_sd_time_between_sess = sd(time_gap, na.rm = T),
+            ae_max_time_between_sess = my.max(time_gap),
+            ae_min_time_between_sess = my.min(time_gap),
+            ae_IQR_time_between_sess = IQR(time_gap, na.rm = T),
+            ae_skew_time_between_sess = skewness(time_gap, na.rm = T),
+            ae_kurt_time_between_sess = kurtosis(time_gap, na.rm = T))
+
+# Extract features for app use before the start of term and during the first winter break
+feat_app_sess_f2 <- app_session_first %>%
+  group_by(user_id) %>%
+  summarize(ae_app_before_firstterm = ifelse(TRUE %in% app_before_firstterm, TRUE, FALSE), #if a students has any app session before first term (any TRUE in the column `app_before_firstterm`) he/she gets a TRUE
+            ae_app_first_winter = ifelse(TRUE %in% app_first_winter, TRUE, FALSE))
+
+# Extract features for weekday use only
+app_sess_weekday_f <- app_session_first %>%
+  mutate(time = hms::as_hms(app_open_time)) %>%
+  filter(in_firstterm == "firstterm",
+         app_open_weekdays != 1, app_open_weekdays != 7, !(app_open_weekdays == 6 & time >= hms('18:00:00'))) %>% #exclude Saturday, Sunday and Friday after 6pm
+  group_by(user_id) %>% #per person
+  summarize(ae_total_app_used_weekdays = n_distinct(app_open_date, na.rm = T),
+            ae_total_sess_weekdays = n(),
+            ae_total_sess_dur_weekdays = sum(sess_duration, na.rm = T),
+            ae_mean_sess_dur_weekdays = mean(sess_duration, na.rm = T),
+            ae_sd_sess_dur_weekdays = sd(sess_duration, na.rm = T),
+            ae_max_sess_dur_weekdays = my.max(sess_duration),
+            ae_min_sess_dur_weekdays = my.min(sess_duration),
+            ae_IQR_sess_dur_weekdays = IQR(sess_duration, na.rm = T),
+            ae_skew_sess_dur_weekdays = skewness(sess_duration, na.rm = T),
+            ae_kurt_sess_dur_weekdays = kurtosis(sess_duration, na.rm = T))
+
+# Extract features for weekend use only
+app_sess_weekend_f <- app_session_first %>%
+  mutate(time = hms::as_hms(app_open_time)) %>%
+  filter(in_firstterm == "firstterm",
+         app_open_weekdays == 1 | app_open_weekdays == 7 | (app_open_weekdays == 6 & time >= hms('18:00:00'))) %>% #exclude all weekdays to only keep Saturday, Sunday and Friday from 6 pm
+  group_by(user_id) %>% #per person
+  summarize(ae_total_app_used_weekend = n_distinct(app_open_date, na.rm = T),
+            ae_total_sess_weekend = n(),
+            ae_total_sess_dur_weekend = sum(sess_duration, na.rm = T),
+            ae_mean_sess_dur_weekend = mean(sess_duration, na.rm = T),
+            ae_sd_sess_dur_weekend = sd(sess_duration, na.rm = T),
+            ae_max_sess_dur_weekend = my.max(sess_duration),
+            ae_min_sess_dur_weekend = my.min(sess_duration),
+            ae_IQR_sess_dur_weekend = IQR(sess_duration, na.rm = T),
+            ae_skew_sess_dur_weekend = skewness(sess_duration, na.rm = T),
+            ae_kurt_sess_dur_weekend = kurtosis(sess_duration, na.rm = T))
+
+# Extract ratio for between weekday and weekend use and include all features in one df "feat_app_sess_week_f"
+app_sess_week_f <- full_join(app_sess_weekday_f, app_sess_weekend_f, by = "user_id")
+
+# save all features for which NA is supposed to be replaced with 0
+app_sess_week_f_rep = grep(colnames(app_sess_week_f), pattern = "_total_", value = TRUE)
+app_sess_week_f_rep = c(app_sess_week_f_rep, grep(colnames(app_sess_week_f), pattern = "_mean_", value = TRUE))
+app_sess_week_f_rep = c(app_sess_week_f_rep, grep(colnames(app_sess_week_f), pattern = "_max_", value = TRUE))
+app_sess_week_f_rep = c(app_sess_week_f_rep, grep(colnames(app_sess_week_f), pattern = "_min_", value = TRUE))
+app_sess_week_f_rep = c(app_sess_week_f_rep, grep(colnames(app_sess_week_f), pattern = "_IQR_", value = TRUE))
+
+# replace NAs in selected features with zeros
+app_sess_week_f[app_sess_week_f_rep][is.na(app_sess_week_f[app_sess_week_f_rep])] = 0
+
+# calculate further ratio features for app_sess_week, while keeping already calculated features form app_sess_weekend_f and app_sess_week_f
+feat_app_sess_week_f <- app_sess_week_f %>%
+  mutate(ae_ratio_total_app_used_weekday_to_weekend = ae_total_app_used_weekdays / ae_total_app_used_weekend,
+         ae_ratio_total_sess_weekday_to_weekend = ae_total_sess_weekdays / ae_total_sess_weekend,
+         ae_ratio_total_sess_dur_weekday_to_weekend = ae_total_sess_dur_weekdays / ae_total_sess_dur_weekend,
+         ae_ratio_mean_sess_dur_weekday_to_weekend = ae_mean_sess_dur_weekdays / ae_mean_sess_dur_weekend,
+         ae_ratio_sd_sess_dur_weekday_to_weekend = ae_sd_sess_dur_weekdays / ae_sd_sess_dur_weekend) %>%
+  mutate(ae_ratio_total_app_used_weekday_to_weekend = na_if(ae_ratio_total_app_used_weekday_to_weekend, 'Inf'), #turn infinite values into NA
+         ae_ratio_total_sess_weekday_to_weekend = na_if(ae_ratio_total_sess_weekday_to_weekend, 'Inf'),
+         ae_ratio_total_sess_dur_weekday_to_weekend = na_if(ae_ratio_total_sess_dur_weekday_to_weekend, 'Inf'),
+         ae_ratio_mean_sess_dur_weekday_to_weekend = na_if(ae_ratio_mean_sess_dur_weekday_to_weekend, 'Inf'),
+         ae_ratio_sd_sess_dur_weekday_to_weekend = na_if(ae_ratio_sd_sess_dur_weekday_to_weekend, 'Inf'))
+```
+
+Basic modelling and coefficient extraction to use as feature:
+```{r}
+# extract slope from regression of mean session duration on date (all dates used, mean_sess_dur = 0 at days without use)
+## individual function needed, as mean is calculated (my.slopeExtraction counts via n())
+feat_slope_sessdur <- app_session_first %>%
+  filter(in_firstterm == "firstterm") %>%
+  mutate(Date = as.Date(app_open_date)) %>%
+  group_by(user_id, Date) %>% # group by user and day
+  summarize(mean_sess_dur = mean(sess_duration, na.rm = T)) %>% #calculate mean session duration per user per day
+  complete(Date = seq.Date(min(Date), max(Date), by = "day")) %>% # insert missing dates
+  mutate(mean_sess_dur = replace_na(mean_sess_dur, 0)) %>% # make NAs for no session data to 0 because no use on that day
+  split(.$user_id) %>%
+  map(~ lm(mean_sess_dur ~ Date, data = .)) %>% #calculate one regression per user
+  map(coef) %>% # get coefficients of each individual model
+  map_dbl("Date") %>% # extract only the "day" coefficient/slope for each model, ignore intercept
+  as.data.frame() %>% # turn into data frame so that each user_id has their own coefficient
+  rownames_to_column('user_id') %>% # recreate user_id column
+  rename("ae_coef_sessdur" = ".")
+
+
+# extract slope from regression of number of sessions on date (all dates used, total_sess = 0 at days without use)
+app_session_first_f <- app_session_first %>%
+  filter(in_firstterm == "firstterm")
+feat_slope_totalsess <- my.slopeExtraction(df= app_session_first_f, date_var = app_open_date, feat_name = "ae_coef_totalsess")
+```
+
+#### Campus event attendance
+Overview and preparation:
+```{r camp ev att prep}
+# Furter preparation of df
+campus_event_attendance <- campus_event_attendance %>%
+  mutate(rating_1star = case_when(feedback_rating == 20 ~ "TRUE", TRUE ~ "FALSE"), #classify for each user whether they gave a 1/2/3/4/5 star rating for an event
+         rating_2star = case_when(feedback_rating == 40 ~ "TRUE", TRUE ~ "FALSE"),
+         rating_3star = case_when(feedback_rating == 60 ~ "TRUE", TRUE ~ "FALSE"),
+         rating_4star = case_when(feedback_rating == 80 ~ "TRUE", TRUE ~ "FALSE"),
+         rating_5star = case_when(feedback_rating == 100 ~ "TRUE", TRUE ~ "FALSE"))
+```
+Classification of logs as during or outside of first term:
+```{r joint set camp ev att}
+# Create a joint data set containing term of admission
+campus_event_attendance_retention <- join_df_retention(campus_event_attendance, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+campus_event_attendance_first <- mutate_var_in_firstterm(campus_event_attendance_retention, checkin_time) %>% filter(in_firstterm == "firstterm") #directly classify in "firstterm" and "not firstterm" and exclude all logs that lie out of the frist term
+```
+Feature extraction:
+```{r feat camp ev att}
+feat_camp_ev_att_f <- campus_event_attendance_first %>%
+  replace_with_na_at("feedback_rating", ~.x < 0) %>% # turn negative (-1) feedback ratings to NA, as those were apparently missing
+  group_by(user_id) %>% #per person
+  arrange(checkin_time) %>%
+  mutate(time_gap = as.numeric(checkin_time-lag(checkin_time), units = 'secs')) %>% # calculate time span between two logs for each user
+  summarize(ce_total_camp_ev = n(), #number of events attended
+            ce_mean_rat_camp_ev = mean(feedback_rating, na.rm = T), #mean rating of events
+            ce_sd_rat_camp_ev = sd(feedback_rating, na.rm = T),
+            ce_max_rat_camp_ev = my.max(feedback_rating),
+            ce_min_rat_camp_ev = my.min(feedback_rating),
+            ce_mean_time_between_ev = mean(time_gap, na.rm = T), #mean time passed between two event attendances
+            ce_sd_time_between_ev = sd(time_gap, na.rm = T),
+            ce_max_time_between_ev = my.max(time_gap),
+            ce_min_time_between_ev = my.min(time_gap),
+            ce_IQR_time_between_ev = IQR(time_gap, na.rm = T),
+            ce_skew_time_between_ev = skewness(time_gap, na.rm = T),
+            ce_kurt_time_between_ev = kurtosis(time_gap, na.rm = T),
+            ce_total_rat_camp_ev_1star = length(rating_1star[rating_1star == TRUE]), #number of 1 star ratings given
+            ce_total_rat_camp_ev_2star = length(rating_2star[rating_2star == TRUE]),
+            ce_total_rat_camp_ev_3star = length(rating_3star[rating_3star == TRUE]),
+            ce_total_rat_camp_ev_4star = length(rating_4star[rating_4star == TRUE]),
+            ce_total_rat_camp_ev_5star = length(rating_5star[rating_5star == TRUE]),
+            ce_ratio_1star_to_rest = length(rating_1star[rating_1star == TRUE])/length(rating_1star), #ratio of 1 star ratings given to all ratings given
+            ce_ratio_2star_to_rest = length(rating_2star[rating_2star == TRUE])/length(rating_1star),
+            ce_ratio_3star_to_rest = length(rating_3star[rating_3star == TRUE])/length(rating_1star),
+            ce_ratio_4star_to_rest = length(rating_4star[rating_4star == TRUE])/length(rating_1star),
+            ce_ratio_5star_to_rest = length(rating_5star[rating_5star == TRUE])/length(rating_1star))
+```
+
+### Campus wall posts
+
+Classification of logs as during or outside of first term:
+```{r joint set term camp wl post}
+# Create a joint data set containing term of admission
+campus_wall_post_retention <- join_df_retention(campus_wall_post, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+campus_wall_post_first <- mutate_var_in_firstterm(campus_wall_post_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat camp wl post}
+feat_camp_wl_post_f <- campus_wall_post_first %>%
+  group_by(user_id) %>%
+  arrange(date_created) %>%
+  mutate(time_gap = as.numeric(date_created-lag(date_created), units = 'secs')) %>% # calculate time span between two logs for each user
+  summarize(ce_total_post_wl = n(), #wall posts per person
+            ce_total_likes_rec_post_wl = sum(number_of_likes, na.rm = T), #total post likes
+            ce_mean_likes_rec_post_wl = mean(number_of_likes, na.rm = T),
+            ce_sd_likes_rec_post_wl = sd(number_of_likes, na.rm = T),
+            ce_max_likes_rec_post_wl = my.max(number_of_likes),
+            ce_min_likes_rec_post_wl = my.min(number_of_likes),
+            ce_skew_likes_rec_post_wl = skewness(number_of_likes, na.rm = T),
+            ce_kurt_likes_rec_post_wl = kurtosis(number_of_likes, na.rm = T),
+            ce_total_com_rec_post_wl = sum(number_of_comments, na.rm = T), #total comments received
+            ce_mean_com_rec_post_wl = mean(number_of_comments, na.rm = T), #mean number of comments received per post
+            ce_sd_com_rec_post_wl = sd(number_of_comments, na.rm = T),
+            ce_max_com_rec_post_wl = my.max(number_of_comments),
+            ce_min_com_rec_post_wl = my.min(number_of_comments),
+            ce_skew_com_rec_post_wl = skewness(number_of_comments, na.rm = T),
+            ce_kurt_com_rec_post_wl = kurtosis(number_of_comments, na.rm = T),
+            ce_mean_time_between_posts_wl = mean(time_gap, na.rm = T), #average time between two posts
+            ce_sd_time_between_posts_wl = sd(time_gap, na.rm = T),
+            ce_max_time_between_posts_wl = my.max(time_gap),
+            ce_min_time_between_posts_wl = my.min(time_gap),
+            ce_IQR_time_between_posts_wl = IQR(time_gap, na.rm = T),
+            ce_skew_time_between_posts_wl = skewness(time_gap, na.rm = T),
+            ce_kurt_time_between_posts_wl = kurtosis(time_gap, na.rm = T),
+            ce_ratio_post_posttolike_wl = ce_total_post_wl/ce_total_likes_rec_post_wl, #ratio of total posts to total likes received
+            ce_ratio_post_posttocom_wl = ce_total_post_wl/ce_total_com_rec_post_wl, #ratio of total posts to total comments received on posts
+            ce_ratio_likestocom_wl = ce_total_likes_rec_post_wl/ce_total_com_rec_post_wl) %>% #ratio of likes received for posts and total comments received
+  mutate(ce_ratio_post_posttolike_wl = na_if(ce_ratio_post_posttolike_wl, 'Inf'), #turn infinite values into NA
+         ce_ratio_post_posttocom_wl = na_if(ce_ratio_post_posttocom_wl, 'Inf'),
+         ce_ratio_likestocom_wl = na_if(ce_ratio_likestocom_wl, 'Inf'))
+
+# NLP features
+feat_camp_wl_post_text_f <- campus_wall_post_first %>%
+  tidytext::unnest_tokens(word, text) %>% #spread df so that each word has its own row
+  anti_join(tidytext::stop_words) %>% #exclude "stop words"
+  left_join(tidytext::get_sentiments("nrc")) %>% #classify words in neg and pos by help of the NRC Word-Emotion Association Lexicon from Saif Mohammad and Peter Turney
+  group_by(user_id, id) %>% #group by user_id and post_id
+  summarize(words_per_post = n(), #total number of words per post
+            different_words_per_post = n_distinct(word), #total number of different words per post
+            sentiment_pos = count_if("positive", sentiment), #total number of positive words per post
+            sentiment_neg = count_if("negative", sentiment)) %>% #total number of negative words per post
+  summarize(ce_total_words_post_wl = sum(words_per_post), #total words in all posts
+            ce_mean_words_post_wl = mean(words_per_post), #average number of words per post
+            ce_total_diff_words_post_wl = sum(different_words_per_post),
+            ce_mean_diff_words_per_post_wl = mean(different_words_per_post),
+            ce_total_sentiment_pos_post_wl = sum(sentiment_pos),
+            ce_mean_sentiment_pos_per_post_wl = mean(sentiment_pos),
+            ce_total_sentiment_neg_post_wl = sum(sentiment_neg),
+            ce_mean_sentiment_neg_per_post_wl = mean(sentiment_neg)) %>%
+  mutate(ce_ratio_diff_words_to_all_words_post_wl = ce_total_diff_words_post_wl/ce_total_words_post_wl, #ratio of different to all words
+         ce_net_sentiment_post_wl = ce_total_sentiment_pos_post_wl - ce_total_sentiment_neg_post_wl) %>% #net sentiment (pos-neg words)
+  mutate(ce_ratio_diff_words_to_all_words_post_wl = na_if(ce_ratio_diff_words_to_all_words_post_wl, 'Inf')) #turn infinite values into NA
+```
+
+### Likes of campus wall posts
+
+Classification of logs as during or outside of first term:
+```{r joint set camp wl post like}
+# Create a joint data set containing term of admission
+campus_wall_post_like_retention <- join_df_retention(campus_wall_post_like, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+campus_wall_post_like_first <- mutate_var_in_firstterm(campus_wall_post_like_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat camp wl post like}
+feat_camp_wl_post_like_f <- campus_wall_post_like_first %>%
+  group_by(user_id) %>%
+  summarize(ce_total_likes_giv_post_wl = n()) #wall post likes per person
+```
+
+### Comments on campus wall posts
+
+Classification of logs as during or outside of first term:
+```{r joint set camp wll post com}
+# Create a joint data set containing term of admission
+campus_wall_comment_retention <- join_df_retention(campus_wall_comment, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+campus_wall_comment_first <- mutate_var_in_firstterm(campus_wall_comment_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat camp wll post com}
+feat_camp_wl_com_f <- campus_wall_comment_first %>%
+  group_by(user_id) %>%
+  summarize(ce_total_com_post_wl = n(), # total number of comments on wall posts
+            ce_total_likes_rec_com_post_wl = sum(number_of_likes, na.rm = T), # total number of likes received on comments on wall posts
+            ce_mean_likes_rec_com_post_wl = mean(number_of_likes, na.rm = T), # mean number of likes per comment on wall posts
+            ce_sd_likes_rec_com_post_wl = sd(number_of_likes, na.rm = T),
+            ce_max_likes_rec_com_post_wl = my.max(number_of_likes),
+            ce_min_likes_rec_com_post_wl = my.min(number_of_likes),
+            ce_skew_likes_rec_com_post_wl = skewness(number_of_likes, na.rm = T),
+            ce_kurt_likes_rec_com_post_wl = kurtosis(number_of_likes, na.rm = T),
+            ce_ratio_com_liketocom_post_wl = ce_total_com_post_wl/ce_total_likes_rec_com_post_wl) %>%
+  mutate(ce_ratio_com_liketocom_post_wl = na_if(ce_ratio_com_liketocom_post_wl, 'Inf')) # turn infinite values into NA
+
+# Entropy of wall comments written
+feat_entropy_camp_wl_com_f <- campus_wall_comment_first %>%
+  group_by(user_id, post_id) %>%
+  summarize(coms_per_post = n()) %>%
+  group_by(user_id) %>%
+  summarize(ce_entropy_com_post_wl = entropy.MillerMadow(coms_per_post)) # entropy of comment on different posts per user
+  
+# NLP features
+feat_camp_wl_com_text_f <- campus_wall_comment_first %>%
+  tidytext::unnest_tokens(word, text) %>%
+  anti_join(tidytext::stop_words) %>%
+  left_join(tidytext::get_sentiments("nrc")) %>%
+  group_by(user_id, id) %>%
+  summarize(words_per_com = n(),
+            different_words_per_com = n_distinct(word),
+            sentiment_pos = count_if("positive", sentiment),
+            sentiment_neg = count_if("negative", sentiment)) %>%
+  summarize(ce_total_words_com_post_wl = sum(words_per_com),
+            ce_mean_words_com_post_wl = mean(words_per_com),
+            ce_total_diff_words_com_post_wl = sum(different_words_per_com),
+            ce_mean_diff_words_per_com_post_wl = mean(different_words_per_com),
+            ce_total_sentiment_pos_com_post_wl = sum(sentiment_pos),
+            ce_mean_sentiment_pos_per_com_post_wl = mean(sentiment_pos),
+            ce_total_sentiment_neg_com_post_wl = sum(sentiment_neg),
+            ce_mean_sentiment_neg_per_com_post_wl = mean(sentiment_neg)) %>%
+  mutate(ce_ratio_diff_words_to_all_words_com_post_wl = ce_total_diff_words_com_post_wl/ce_total_words_com_post_wl,
+         ce_net_sentiment_com_post_wl = ce_total_sentiment_pos_com_post_wl - ce_total_sentiment_neg_com_post_wl) %>%
+  mutate(ce_ratio_diff_words_to_all_words_com_post_wl = na_if(ce_ratio_diff_words_to_all_words_com_post_wl, 'Inf'))
+```
+
+### Likes of campus wall posts comments
+
+Classification of logs as during or outside of first term:
+```{r joint set camp wl post com likes}
+# Create a joint data set containing term of admission
+campus_wall_comment_like_retention <- join_df_retention(campus_wall_comment_like, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+campus_wall_comment_like_first <- mutate_var_in_firstterm(campus_wall_comment_like_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat camp wl post com likes}
+feat_camp_wl_com_like_f <- campus_wall_comment_like_first %>%
+  group_by(user_id) %>%
+  summarize(ce_total_likes_giv_com_post_wl = n()) #number of wall comment likes per person
+```
+
+### Members of a social group
+
+Classification of logs as during or outside of first term:
+```{r joint set memb socgrp}
+# Create a joint data set containing term of admission
+social_group_member_retention <- join_df_retention(social_group_member, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+social_group_member_first <- mutate_var_in_firstterm(social_group_member_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat memb socgrp}
+# Number of group memberships per person
+feat_soc_grp_memb_f <- social_group_member_first %>%
+  group_by(user_id) %>% 
+  summarize(ce_total_soc_grp = n()) #social groups per person
+```
+
+### Posts in a social group
+
+Classification of logs as during or outside of first term:
+```{r joint set socgrp post}
+# Create a joint data set containing term of admission
+social_group_post_retention <- join_df_retention(social_group_post, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+social_group_post_first <- mutate_var_in_firstterm(social_group_post_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat socgrp post}
+feat_soc_grp_post_f <- social_group_post_first %>%
+  group_by(user_id) %>%
+  arrange(date_created) %>%
+  mutate(time_gap = as.numeric(date_created-lag(date_created), units = 'secs')) %>% # calculate time span between two logs for each user
+  summarize(ce_total_post_sg = n(), #total posts per person
+            ce_total_likes_rec_post_sg = sum(number_of_likes, na.rm = T), #total likes
+            ce_mean_likes_rec_post_sg = mean(number_of_likes, na.rm = T), #likes per post
+            ce_sd_likes_rec_post_sg = sd(number_of_likes, na.rm = T),
+            ce_max_likes_rec_post_sg = my.max(number_of_likes),
+            ce_min_likes_rec_post_sg = my.min(number_of_likes),
+            ce_skew_likes_rec_post_sg = skewness(number_of_likes, na.rm = T),
+            ce_kurt_likes_rec_post_sg = kurtosis(number_of_likes, na.rm = T),
+            ce_total_com_rec_post_sg = sum(number_of_comments, na.rm = T), #total comments
+            ce_mean_com_rec_post_sg = mean(number_of_comments, na.rm = T), #comments per post
+            ce_sd_com_rec_post_sg = sd(number_of_comments, na.rm = T),
+            ce_max_com_rec_post_sg = my.max(number_of_comments),
+            ce_min_com_rec_post_sg = my.min(number_of_comments),
+            ce_skew_com_rec_post_sg = skewness(number_of_comments, na.rm = T),
+            ce_kurt_com_rec_post_sg = kurtosis(number_of_comments, na.rm = T),
+            ce_mean_time_between_posts_sg = mean(time_gap, na.rm = T), #average time between two posts
+            ce_sd_time_between_posts_sg = sd(time_gap, na.rm = T),
+            ce_max_time_between_posts_sg = my.max(time_gap),
+            ce_min_time_between_posts_sg = my.min(time_gap),
+            ce_IQR_time_between_posts_sg = IQR(time_gap, na.rm = T),
+            ce_skew_time_between_posts_sg = skewness(time_gap, na.rm = T),
+            ce_kurt_time_between_posts_sg = kurtosis(time_gap, na.rm = T),
+            ce_ratio_post_posttolike_sg = ce_total_post_sg/ce_total_likes_rec_post_sg, #ratio between posts and likes
+            ce_ratio_post_posttocom_sg = ce_total_post_sg/ce_total_com_rec_post_sg,
+            ce_ratio_likestocom_sg = ce_total_likes_rec_post_sg/ce_total_com_rec_post_sg) %>%
+  mutate(ce_ratio_post_posttolike_sg = na_if(ce_ratio_post_posttolike_sg, 'Inf'), # turn infinite values into NA
+         ce_ratio_post_posttocom_sg = na_if(ce_ratio_post_posttocom_sg, 'Inf'),
+         ce_ratio_likestocom_sg = na_if(ce_ratio_likestocom_sg, 'Inf'))
+
+# NLP features
+feat_soc_grp_post_text_f <- social_group_post_first %>%
+  tidytext::unnest_tokens(word, text) %>%
+  anti_join(tidytext::stop_words) %>%
+  left_join(tidytext::get_sentiments("nrc")) %>% #classify words
+  group_by(user_id, id) %>%
+  summarize(words_per_post = n(),
+            different_words_per_post = n_distinct(word),
+            sentiment_pos = count_if("positive", sentiment),
+            sentiment_neg = count_if("negative", sentiment)) %>%
+  summarize(ce_total_words_post_sg = sum(words_per_post),
+            ce_mean_words_post_sg = mean(words_per_post),
+            ce_total_diff_words_post_sg = sum(different_words_per_post),
+            ce_mean_diff_words_per_post_sg = mean(different_words_per_post),
+            ce_total_sentiment_pos_post_sg = sum(sentiment_pos),
+            ce_mean_sentiment_pos_per_post_sg = mean(sentiment_pos),
+            ce_total_sentiment_neg_post_sg = sum(sentiment_neg),
+            ce_mean_sentiment_neg_per_post_sg = mean(sentiment_neg)) %>%
+  mutate(ce_ratio_diff_words_to_all_words_post_sg = ce_total_diff_words_post_sg/ce_total_words_post_sg,
+         ce_net_sentiment_post_sg = ce_total_sentiment_pos_post_sg - ce_total_sentiment_neg_post_sg) %>%
+  mutate(ce_ratio_diff_words_to_all_words_post_sg = na_if(ce_ratio_diff_words_to_all_words_post_sg, 'Inf'))
+```
+
+### Likes of posts in social groups
+
+Classification of logs as during or outside of first term:
+```{r joint set socgrp post like}
+# Create a joint data set containing term of admission
+social_group_post_like_retention <- join_df_retention(social_group_post_like, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+social_group_post_like_first <- mutate_var_in_firstterm(social_group_post_like_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat socgrp post like}
+feat_soc_grp_post_like_f <- social_group_post_like_first %>%
+  group_by(user_id) %>%
+  summarize(ce_total_likes_giv_post_sg = n()) #post likes per person
+```
+
+### Comments on a social group post
+
+Classification of logs as during or outside of first term:
+```{r joint set socgrp post com}
+# Create a joint data set containing term of admission
+social_group_comment_retention <- join_df_retention(social_group_comment, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+social_group_comment_first <- mutate_var_in_firstterm(social_group_comment_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat socgrp post com}
+feat_soc_grp_com_f <- social_group_comment_first %>%
+  group_by(user_id) %>% 
+  summarize(ce_total_com_post_sg = n(), #comments per person
+            ce_total_likes_rec_com_post_sg = sum(number_of_likes, na.rm = T), #comment likes per person
+            ce_mean_likes_rec_com_post_sg = mean(number_of_likes, na.rm = T), #likes per comment per person
+            ce_sd_likes_rec_com_post_sg = sd(number_of_likes, na.rm = T),
+            ce_max_likes_rec_com_post_sg = my.max(number_of_likes),
+            ce_min_likes_rec_com_post_sg = my.min(number_of_likes),
+            ce_skew_likes_rec_com_post_sg = skewness(number_of_likes, na.rm = T),
+            ce_kurt_likes_rec_com_post_sg = kurtosis(number_of_likes, na.rm = T),
+            ce_ratio_com_liketocom_post_sg = ce_total_com_post_sg/ce_total_likes_rec_com_post_sg) %>%
+  mutate(ce_ratio_com_liketocom_post_sg = na_if(ce_ratio_com_liketocom_post_sg, 'Inf')) #turn infinite values into NA
+
+# Entropy of wall comments written
+feat_entropy_soc_grp_com_f <- social_group_comment_first %>%
+  group_by(user_id, post_id) %>%
+  summarize(coms_per_post = n()) %>%
+  group_by(user_id) %>%
+  summarize(ce_entropy_com_post_sg = entropy.MillerMadow(coms_per_post))
+
+# NLP features
+feat_soc_grp_com_text_f <- social_group_comment_first %>%
+  tidytext::unnest_tokens(word, text) %>%
+  anti_join(tidytext::stop_words) %>%
+  left_join(tidytext::get_sentiments("nrc")) %>% #classify words in neg and pos
+  group_by(user_id, id) %>%
+  summarize(words_per_com = n(),
+            different_words_per_com = n_distinct(word),
+            sentiment_pos = count_if("positive", sentiment),
+            sentiment_neg = count_if("negative", sentiment)) %>%
+  summarize(ce_total_words_com_post_sg = sum(words_per_com),
+            ce_mean_words_com_post_sg = mean(words_per_com),
+            ce_total_diff_words_com_post_sg = sum(different_words_per_com),
+            ce_mean_diff_words_per_com_post_sg = mean(different_words_per_com),
+            ce_total_sentiment_pos_com_post_sg = sum(sentiment_pos),
+            ce_mean_sentiment_pos_per_com_post_sg = mean(sentiment_pos),
+            ce_total_sentiment_neg_com_post_sg = sum(sentiment_neg),
+            ce_mean_sentiment_neg_per_com_post_sg = mean(sentiment_neg)) %>%
+  mutate(ce_ratio_diff_words_to_all_words_com_post_sg = ce_total_diff_words_com_post_sg/ce_total_words_com_post_sg,
+         ce_net_sentiment_com_post_sg = ce_total_sentiment_pos_com_post_sg - ce_total_sentiment_neg_com_post_sg) %>%
+  mutate(ce_ratio_diff_words_to_all_words_com_post_sg = na_if(ce_ratio_diff_words_to_all_words_com_post_sg, 'Inf'))
+```
+
+#### Likes of comments on posts in social groups
+
+Classification of logs as during or outside of first term:
+```{r joint set socgrp post com like}
+# Create a joint data set containing term of admission
+social_group_comment_like_retention <- join_df_retention(social_group_comment_like, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+social_group_comment_like_first <- mutate_var_in_firstterm(social_group_comment_like_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat socgrp post com like}
+feat_soc_grp_com_like_f <- social_group_comment_like_first %>%
+  group_by(user_id) %>%
+  summarize(ce_total_likes_giv_com_post_sg = n()) #group comment likes per person
+```
+
+#### Ratio of posts to comments in social groups
+Join feat_post und feat_comment by id to get ration of posts to comments
+```{r feat ratio socgrp post com} 
+soc_grp_ratio_f <- inner_join(feat_soc_grp_post_f, feat_soc_grp_com_f, by= 'user_id')
+head(soc_grp_ratio_f)
+colSums(is.na(soc_grp_ratio_f))
+
+feat_soc_grp_ratio_f <- soc_grp_ratio_f %>%
+  group_by(user_id) %>%
+  summarize(ce_ratio_posttocom_sg = ce_total_post_sg/ce_total_com_post_sg) #ratio of posts to comments
+```
+
+### Number of chat messages (including students who did not receive or send any)
+
+Classification of logs as during or outside of first term:
+```{r joint set chat msg}
+# Create a joint data set containing term of admission
+chat_message_retention <- join_df_retention(chat_message, join_by = c("user_id" = "sender_id"))
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+chat_message_first <- mutate_var_in_firstterm(chat_message_retention, date_created) %>% rename("sender_id" = "user_id") %>% filter(in_firstterm == "firstterm")
+```
+Data set creation and preparation:
+```{r total chat msg}
+# check if there are people who only sent and did not receive anything and vica versa
+test_msg_f <- chat_message_first %>%
+  mutate(s = sender_id %in% receiver_id,
+        r = receiver_id %in% sender_id)
+summary(test_msg_f$s)
+summary(test_msg_f$r)
+
+# classify messages in weekend or weekday
+chat_message_first <- chat_message_first %>%
+  mutate(time = hms::as_hms(date_created)) %>%
+  mutate(weekday_created = wday(date_created , week_start = getOption("lubridate.week.start", 7))) %>% #add column identifying the weekdays of use (0-7 starting on Sunday)
+  mutate(day_in_week = case_when(weekday_created == 1 | weekday_created == 7 | (weekday_created == 6 & time >= hms('18:00:00')) ~ "weekend",
+                                 weekday_created != 1 & weekday_created != 7 & !(weekday_created == 6 & time >= hms('18:00:00')) ~ "weekday"))
+# create df with all messages on weekend
+chat_message_weekend_f <-  chat_message_first %>%
+  select(sender_id, receiver_id, day_in_week) %>%
+  filter(day_in_week == "weekend") %>%
+  distinct(sender_id, receiver_id) %>% #only keep each pair once
+  rename("receiver_id_weekend" = "receiver_id")
+# create df with all messages during week
+chat_message_weekday_f <-  chat_message_first %>%
+  select(sender_id, receiver_id, day_in_week) %>%
+  filter(day_in_week == "weekday") %>%
+  distinct(sender_id, receiver_id) %>% #only keep each pair once
+  rename("receiver_id_weekday" = "receiver_id")
+
+# create df with a row for each sender with all receivers on weekend and on weekdays in columns
+chat_message_week_f <- full_join(chat_message_weekend_f, chat_message_weekday_f)
+  
+# create data set with total number of messages sent and other features for sender
+total_chat_msg_sent_f <- chat_message_first %>%
+  group_by(sender_id) %>%
+  arrange(date_created) %>%
+  mutate(time_gap_sent = as.numeric(date_created-lag(date_created), units = 'secs')) %>% # calculate time span between two logs for each user
+  summarize(ce_total_chat_msg_sent = n(),
+            ce_total_addressees = n_distinct(receiver_id),
+            ce_mean_time_between_msg_sent = mean(time_gap_sent, na.rm = T),
+            ce_sd_time_between_msg_sent = sd(time_gap_sent, na.rm = T),
+            ce_max_time_between_msg_sent = my.max(time_gap_sent),
+            ce_min_time_between_msg_sent = my.min(time_gap_sent),
+            ce_IQR_time_between_msg_sent = IQR(time_gap_sent, na.rm = T),
+            ce_skew_time_between_msg_sent = skewness(time_gap_sent, na.rm = T),
+            ce_kurt_time_between_msg_sent = kurtosis(time_gap_sent, na.rm = T)) %>% 
+  rename("user_id" = "sender_id")
+
+# create data set with total number of messages received and other features for receiver
+total_chat_msg_rec_f <- chat_message_first %>%
+  group_by(receiver_id) %>%
+  arrange(date_created) %>%
+  mutate(time_gap_rec = as.numeric(date_created-lag(date_created), units = 'secs')) %>% # calculate time span between two logs for each user
+  summarize(ce_total_chat_msg_rec = n(),
+            ce_total_senders = n_distinct(sender_id),
+            ce_mean_time_between_msg_rec = mean(time_gap_rec, na.rm = T),
+            ce_sd_time_between_msg_rec = sd(time_gap_rec, na.rm = T),
+            ce_max_time_between_msg_rec = my.max(time_gap_rec),
+            ce_min_time_between_msg_rec = my.min(time_gap_rec),
+            ce_IQR_time_between_msg_rec = IQR(time_gap_rec, na.rm = T),
+            ce_skew_time_between_msg_rec = skewness(time_gap_rec, na.rm = T),
+            ce_kurt_time_between_msg_rec = kurtosis(time_gap_rec, na.rm = T)) %>% 
+  rename("user_id" = "receiver_id")
+
+# join into one df
+total_messages_f <- full_join(total_chat_msg_sent_f, total_chat_msg_rec_f,  by = "user_id")
+
+# save all features for which NA is supposed to be replaced with 0
+total_messages_f_rep = grep(colnames(total_messages_f), pattern = "_total_", value = TRUE)
+total_messages_f_rep = c(total_messages_f_rep, grep(colnames(total_messages_f), pattern = "_mean_", value = TRUE))
+total_messages_f_rep = c(total_messages_f_rep, grep(colnames(total_messages_f), pattern = "_max_", value = TRUE))
+total_messages_f_rep = c(total_messages_f_rep, grep(colnames(total_messages_f), pattern = "_min_", value = TRUE))
+total_messages_f_rep = c(total_messages_f_rep, grep(colnames(total_messages_f), pattern = "_IQR_", value = TRUE))
+
+# replace NAs in selected features with zeros
+total_messages_f[total_messages_f_rep][is.na(total_messages_f[total_messages_f_rep])] = 0
+```
+Feature extraction:
+```{r feat total chat msg}
+# All features total_chat_msg_sent_f & total_chat_msg_rec_f combined, and some further composite features
+feat_total_messages_f <- total_messages_f %>%
+  group_by(user_id) %>%
+  mutate(ce_total_messages = ce_total_chat_msg_sent + ce_total_chat_msg_rec,
+         ce_ratio_chat_msg_addtosend = ce_total_addressees/ce_total_senders, # Ratio of addressees to senders
+         ce_ratio_chat_msg_rectosent = ce_total_chat_msg_rec/ce_total_chat_msg_sent) %>% # Ratio of messages sent to received
+  mutate(ce_ratio_chat_msg_addtosend = na_if(ce_ratio_chat_msg_addtosend, 'Inf'),
+         ce_ratio_chat_msg_rectosent = na_if(ce_ratio_chat_msg_rectosent, 'Inf'))
+
+# Entropy measures for messages sent
+feat_entropy_chat_msg_sent_f <- chat_message_first %>%
+  group_by(sender_id, receiver_id) %>%
+  summarize(total_msg_person = n()) %>%
+  group_by(sender_id) %>%
+  summarize(ce_entropy_addressees = entropy.MillerMadow(total_msg_person)) %>% 
+  rename("user_id" = "sender_id")
+
+# Entropy measures for messages received
+feat_entropy_chat_msg_rec_f <- chat_message_first %>%
+  group_by(sender_id, receiver_id) %>%
+  summarize(total_msg_person = n()) %>%
+  group_by(receiver_id) %>%
+  summarize(ce_entropy_senders = entropy.MillerMadow(total_msg_person)) %>% 
+  rename("user_id" = "receiver_id")
+
+# Similarity of contacts during week and on weekends (sender)
+feat_chat_message_week_f <- chat_message_week_f %>% 
+  mutate(same_contact = case_when(receiver_id_weekend == receiver_id_weekday ~ "TRUE", TRUE ~ "FALSE")) %>% #add column classifiying as same contact T/F
+  group_by(sender_id) %>%
+  mutate(number_same_contacts = count_if("TRUE", same_contact), #count number of contacts a person sent messages to both during the week and on weekends
+         perc_overlap_contacts_weekend_weekday = count_if("TRUE", same_contact)/(n_distinct(receiver_id_weekend) + n_distinct(receiver_id_weekday) - count_if("TRUE", same_contact))) %>% #calculate the percentage of contacts contacted during the week and on weekends on the total number of contacts, deduct the number of same contacts to prevent counting them twice
+  summarize(ce_perc_overlap_contacts_weekend_weekday = first(perc_overlap_contacts_weekend_weekday)) %>% 
+  rename("user_id" = "sender_id")
+```
+
+Basic modelling and coefficient extraction to use as feature:
+```{r}
+# extract slope from regression of messages sent on date (all dates used, messages = 0 at days without use)
+df_for_slope_mes_sent <- chat_message_first %>% rename("user_id" = "sender_id")
+feat_slope_mes_sent <- my.slopeExtraction(df = df_for_slope_mes_sent, date_var = date_created, feat_name = "ce_coef_mes_sent")
+
+# extract slope from regression of messages received on date (all dates used, messages = 0 at days without use)
+df_for_slope_mes_rec <- chat_message_first %>% rename("user_id" = "receiver_id")
+feat_slope_mes_rec <- my.slopeExtraction(df = df_for_slope_mes_rec, date_var = date_created, feat_name = "ce_coef_mes_rec")
+```
+
+**Note regarding app "click" and "view" data**
+After investigation of the different data sets containing click logs, it seems that the app often creates several logs within seconds for a person. This seems to be either a technical issue or shows that users tapped onto the button/tile several times (e.g., due to long loading times). Either way, this is not what we aim to capture with the features. Therefore, we calculate the time lags between logs for each person. We exclude all logs that occur less than 1 minute after the preceeding log for the same person.
+These cleaned data sets will be used for further calculations.
+This applies to the following data sets:
+
+* clicked_campus_guide_tab
+* clicked_community_tab
+* clicked_home_tab
+* clicked_notifications_tab
+* clicked_profile_tab
+* clicked_tile
+* viewed_campus_event
+* viewed_club_first
+* viewed_user_profile
+
+### Clicks on Campus Guide tab
+
+Classification of logs as during or outside of first term:
+```{r joint set camp tab}
+# Create a joint data set containing term of admission
+clicked_campus_guide_tab_retention <- join_df_retention(clicked_campus_guide_tab, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+clicked_campus_guide_tab_first <- mutate_var_in_firstterm(clicked_campus_guide_tab_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat camp tab}
+clicked_campus_guide_tab_first <- clicked_campus_guide_tab_first %>%
+  group_by(user_id) %>%
+  arrange(date_created) %>%
+  mutate(time_gap = as.numeric(date_created-lag(date_created), units = 'mins')) %>% # calculate time span between two logs for each user
+  filter(time_gap > 1) %>% #exclude all log entries that occured less than one minute after the preceeding log entry for the same person
+  mutate(Date = as.Date(date_created)) #dttm column needs to be preserved for joining dfs by date later
+
+feat_cl_camp_guide_tab_f <- clicked_campus_guide_tab_first %>%
+  summarize(ae_total_click_cg = n(), #number of clicks
+            ae_total_days_click_cg = n_distinct(Date)) #number of days with click(s)
+```
+
+Basic modelling and coefficient extraction to use as feature:
+```{r}
+# extract slope from regression of clicks on campus guide on date (all dates used, clicks = 0 at days without click log)
+feat_slope_camp_guide <- my.slopeExtraction(df = clicked_campus_guide_tab_first, date_var = Date, feat_name = "ae_coef_click_cg")
+```
+
+### Clicks on Community tab
+
+Classification of logs as during or outside of first term:
+```{r joint set com tab}
+# Create a joint data set containing term of admission
+clicked_community_tab_retention <- join_df_retention(clicked_community_tab, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+clicked_community_tab_first <- mutate_var_in_firstterm(clicked_community_tab_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat com tab}
+clicked_community_tab_first <- clicked_community_tab_first %>%
+  group_by(user_id) %>%
+  arrange(date_created) %>%
+  mutate(time_gap = as.numeric(date_created-lag(date_created), units = 'mins')) %>% # calculate time span between two logs for each user
+  filter(time_gap > 1) %>% #exclude all log entries that occured less than one minute after the preceeding log entry for the same person
+  mutate(Date = as.Date(date_created))
+
+feat_cl_com_tab_f <- clicked_community_tab_first %>%
+  summarize(ae_total_click_cmnty = n(), #number of clicks
+            ae_total_days_click_cmnty = n_distinct(Date)) #number of days with click(s)
+```
+
+Basic modelling and coefficient extraction to use as feature:
+```{r}
+# extract slope from regression of clicks on community tab on date (all dates used, clicks = 0 at days without click log)
+feat_slope_com <- my.slopeExtraction(df = clicked_community_tab_first, date_var = Date, feat_name = "ae_coef_click_cmnty")
+```
+
+### Clicks on Home tab
+
+Classification of logs as during or outside of first term:
+```{r joint set home tab}
+# Create a joint data set containing term of admission
+clicked_home_tab_retention <- join_df_retention(clicked_home_tab, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+clicked_home_tab_first <- mutate_var_in_firstterm(clicked_home_tab_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat home tab}
+clicked_home_tab_first <- clicked_home_tab_first %>%
+  group_by(user_id) %>%
+  arrange(date_created) %>%
+  mutate(time_gap = as.numeric(date_created-lag(date_created), units = 'mins')) %>% # calculate time span between two logs for each user
+  filter(time_gap > 1) %>% #exclude all log entries that occured less than one minute after the preceeding log entry for the same person
+  mutate(Date = as.Date(date_created))
+
+feat_cl_home_tab_f <- clicked_home_tab_first %>%
+  summarize(ae_total_click_hm = n(), #number of clicks
+            ae_total_days_click_hm = n_distinct(Date)) #number of days with click(s)
+
+# not enough clicks on home tab p.P. to model regresison
+```
+
+### Clicks on Notifications tab
+
+Classification of logs as during or outside of first term:
+```{r joint set not tab}
+# Create a joint data set containing term of admission
+clicked_notifications_tab_retention <- join_df_retention(clicked_notifications_tab, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+clicked_notifications_tab_first <- mutate_var_in_firstterm(clicked_notifications_tab_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat not tab}
+clicked_notifications_tab_first <- clicked_notifications_tab_first %>%
+  group_by(user_id) %>%
+  arrange(date_created) %>%
+  mutate(time_gap = as.numeric(date_created-lag(date_created), units = 'mins')) %>% # calculate time span between two logs for each user
+  filter(time_gap > 1) %>% #exclude all log entries that occured less than one minute after the preceeding log entry for the same person
+  mutate(Date = as.Date(date_created))
+
+feat_cl_not_tab_f <- clicked_notifications_tab_first %>%
+  summarize(ae_total_click_not = n(), #number of clicks
+            ae_total_days_click_not = n_distinct(Date)) #number of days with click(s)
+```
+
+Basic modelling and coefficient extraction to use as feature:
+```{r}
+# extract slope from regression of clicks on notifications tab on date (all dates used, clicks = 0 at days without click log)
+feat_slope_not <- my.slopeExtraction(df = clicked_notifications_tab_first, date_var = Date, feat_name = "ae_coef_click_not")
+```
+
+### Clicks of Profile tab
+
+Classification of logs as during or outside of first term:
+```{r joint set prfl tab}
+# Create a joint data set containing term of admission
+clicked_profile_tab_retention <- join_df_retention(clicked_profile_tab, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+clicked_profile_tab_first <- mutate_var_in_firstterm(clicked_profile_tab_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat prfl tab}
+clicked_profile_tab_first <- clicked_profile_tab_first %>%
+  group_by(user_id) %>%
+  arrange(date_created) %>%
+  mutate(time_gap = as.numeric(date_created-lag(date_created), units = 'mins')) %>% # calculate time span between two logs for each user
+  filter(time_gap > 1) %>% #exclude all log entries that occured less than one minute after the preceeding log entry for the same person
+  mutate(Date = as.Date(date_created))
+
+feat_cl_prfl_tab_f <- clicked_profile_tab_first %>%
+  summarize(ae_total_click_prfl = n(), #number of clicks
+            ae_total_days_click_prfl = n_distinct(Date)) #number of days with click(s)
+```
+
+Basic modelling and coefficient extraction to use as feature:
+```{r}
+# extract slope from regression of clicks on profile tab on date (all dates used, clicks = 0 at days without click log)
+feat_slope_prfl <- my.slopeExtraction(df = clicked_profile_tab_first, date_var = Date, feat_name = "ae_coef_click_prfl")
+```
+
+### Clicks on tiles
+
+Classification of logs as during or outside of first term:
+```{r joint set tiles}
+# Create a joint data set containing term of admission
+clicked_tile_retention <- join_df_retention(clicked_tile, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+clicked_tile_first <- mutate_var_in_firstterm(clicked_tile_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat tiles}
+clicked_tile_first <- clicked_tile_first %>%
+  group_by(user_id) %>%
+  arrange(date_created) %>%
+  mutate(time_gap = as.numeric(date_created-lag(date_created), units = 'mins')) %>% # calculate time span between two logs for each user
+  filter(time_gap > 1) %>% #exclude all log entries that occured less than one minute after the preceeding log entry for the same person
+  mutate(Date = as.Date(date_created))
+
+feat_cl_tile_f <- clicked_tile_first %>%
+  summarize(ae_total_click_tiles = n(), #number of clicks
+            ae_total_days_click_tiles = n_distinct(Date), #number of days with click(s)
+            ae_total_click_diff_tiles = n_distinct(tile_title, na.rm = T), #number of differnt tiles clicked
+            ae_total_diff_click_sour = n_distinct(source, na.rm = T)) #number of different sources
+```
+
+Basic modelling and coefficient extraction to use as feature:
+```{r}
+# extract slope from regression of clicks on tiles on date (all dates used, clicks = 0 at days without click log)
+feat_slope_tile <- my.slopeExtraction(df = clicked_tile_first, date_var = Date, feat_name = "ae_coef_click_tiles")
+```
+
+### App downloads and registrations (not only for first term students!)
+Students only download and register in the app once, therefore we do not restrict these features to the first term.
+
+Feature extraction:
+```{r feat down reg}
+feat_down_n_reg <- download_and_registration %>% 
+  filter(download_time > ymd(20180101), registration_time > ymd(20180101)) %>% 
+  mutate(dif_time_to_reg = as.numeric(difftime(registration_time, download_time, units = "secs"))) %>%
+  filter(dif_time_to_reg > 0) %>%
+  group_by(user_id) %>% # per person
+  summarize(ae_time_to_reg = sum(dif_time_to_reg, na.rm = T)) #time needed to register
+```
+
+### Friend requests (including students who only received or only sent requests)
+Overview and preparation:
+```{r frnd req}
+friend_request <- friend_request %>% 
+  mutate(time_to_acc = as.numeric(difftime(date_accepted, date_created, units = "secs"))) %>% #time between request and acceptance
+  mutate(time_to_acc = replace(time_to_acc, which(time_to_acc < 0), NA)) #replace negative time with NA as date_acceped was unvalid
+```
+Classification of logs as during or outside of first term:
+```{r joint set frnd req}
+# Create a joint data set containing term of admission
+friend_request_retention <- join_df_retention(friend_request, join_by = c("user_id" = "sender_id"))
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+friend_request_first <- mutate_var_in_firstterm(friend_request_retention, date_created) %>% rename("sender_id" = "user_id") %>% filter(in_firstterm == "firstterm")
+```
+Preparation:
+```{r frnds}
+# look if there are people who only sent and did not receive anything
+test_frnd_f <- friend_request_first %>%
+  mutate(s = sender_id %in% receiver_id,
+        r = receiver_id %in% sender_id)
+summary(test_frnd_f$s)
+summary(test_frnd_f$r)
+
+# create data set with total number of requests sent
+total_frnd_req_sent_f <- friend_request_first %>%
+  group_by(sender_id) %>%
+  summarize(ce_total_frnd_req_sent = n(), #requests received 
+            ce_total_time_wait = sum(time_to_acc, na.rm = T), #time waited for acceptance
+            ce_mean_time_wait = mean(time_to_acc, na.rm = T), #mean time waited per request
+            ce_sd_time_wait = sd(time_to_acc, na.rm = T),
+            ce_max_time_wait = my.max(time_to_acc),
+            ce_min_time_wait = my.min(time_to_acc),
+            ce_skew_time_wait = skewness(time_to_acc, na.rm = T),
+            ce_kurt_time_wait = kurtosis(time_to_acc, na.rm = T)) %>% 
+  rename("user_id" = "sender_id")
+
+# create data set with total number of requests received
+total_frnd_req_rec_f <- friend_request_first %>% 
+  group_by(receiver_id) %>%
+  summarize(ce_total_frnd_req_rec = n(),
+            ce_total_time_acc = sum(time_to_acc, na.rm = T), #time taken to accept
+            ce_mean_time_acc = mean(time_to_acc, na.rm = T), #mean time taken to accept per request
+            ce_sd_time_acc = sd(time_to_acc, na.rm = T),
+            ce_max_time_acc = my.max(time_to_acc),
+            ce_min_time_acc = my.min(time_to_acc),
+            ce_skew_time_acc = skewness(time_to_acc, na.rm = T),
+            ce_kurt_time_acc = kurtosis(time_to_acc, na.rm = T)) %>% 
+  rename("user_id" = "receiver_id")
+
+# join into one data set to have sender and receiver data in one
+feat_total_friends_f <- full_join(total_frnd_req_sent_f, total_frnd_req_rec_f,  by = "user_id")
+
+# save all features for which NA is supposed to be replaced with 0
+feat_total_friends_f_rep = grep(colnames(feat_total_friends_f), pattern = "_total_", value = TRUE)
+feat_total_friends_f_rep = c(feat_total_friends_f_rep, grep(colnames(feat_total_friends_f), pattern = "_mean_", value = TRUE))
+feat_total_friends_f_rep = c(feat_total_friends_f_rep, grep(colnames(feat_total_friends_f), pattern = "_max_", value = TRUE))
+feat_total_friends_f_rep = c(feat_total_friends_f_rep, grep(colnames(feat_total_friends_f), pattern = "_min_", value = TRUE))
+# replace NAs in selected features with zeros
+feat_total_friends_f[feat_total_friends_f_rep][is.na(feat_total_friends_f[feat_total_friends_f_rep])] = 0
+```
+Feature extraction:
+```{r feat frnds}
+feat_total_friends_f <- feat_total_friends_f %>%
+  group_by(user_id) %>%
+  mutate(ce_total_friends = ce_total_frnd_req_sent + ce_total_frnd_req_rec, #total number of friends
+            ce_ratio_frnd_req_rectosent = ce_total_frnd_req_rec/ce_total_frnd_req_sent, #ratio of received to sent requests
+            ce_ratio_time_waittoacc = ce_total_time_wait/ce_total_time_acc) %>% #ratio of time waited to taken to acceptance
+  mutate(ce_ratio_frnd_req_rectosent = na_if(ce_ratio_frnd_req_rectosent, 'Inf'), #turn infinite values into NA
+         ce_ratio_time_waittoacc = na_if(ce_ratio_time_waittoacc, 'Inf'))
+```
+
+### Orientation event attendance
+
+We see that the orientation events only seem to have been registered for the 2019 cohort. Therefore, we do not calculate the features based on `orientation_event_attendance`.
+The code below is therefore commented out. Should we at some point get the full data set, we can include it in the feature calculation again.
+
+Classification of logs as during or outside of first term:
+```{r joint set or ev att}
+# # Create a joint data set containing term of admission
+# orientation_event_attendance_retention <- join_df_retention(orientation_event_attendance, join_by = "user_id")
+# # Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+# orientation_event_attendance_first <- mutate_var_in_firstterm(orientation_event_attendance_retention, checkin_time) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat or ev att}
+# feat_or_ev_att_f <- orientation_event_attendance_first %>% 
+#   replace_with_na_at("feedback_rating", ~.x < 0) %>% # turn negative (-1) feedback ratings to NA, as those were apparently missing
+#   group_by(user_id) %>% 
+#   summarize(ce_total_or_ev=n(), #number of orientation events per person
+#             ce_mean_rat_or_ev = mean(feedback_rating, na.rm = T), #mean rating of events per person
+#             ce_sd_rat_or_ev = sd(feedback_rating, na.rm = T),
+#             ce_max_rat_or_ev = my.max(feedback_rating),
+#             ce_min_rat_or_ev = my.min(feedback_rating))
+```
+
+### Performed searches
+
+Classification of logs as during or outside of first term:
+```{r joint set perf sear}
+# Create a joint data set containing term of admission
+performed_search_retention <- join_df_retention(performed_search, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+performed_search_first <- mutate_var_in_firstterm(performed_search_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat perf sear}
+feat_perf_search_f <- performed_search_first %>%
+  group_by(user_id) %>% 
+  summarize(ae_total_search=n(),
+            ae_total_diff_search_source = n_distinct(source, na.rm = T),
+            ae_total_source_home = count_if("home", source), #count all searches performed from "home"
+            ae_total_source_guide = count_if("campus_guide", source)) #count all searches performed from "campus_guide"
+```
+
+### Service attendance
+
+Classification of logs as during or outside of first term:
+```{r joint set serv att}
+# Create a joint data set containing term of admission
+service_attendance_retention <- join_df_retention(service_attendance, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+service_attendance_first <- mutate_var_in_firstterm(service_attendance_retention, checkin_time) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat serv att}
+feat_serv_att_f <- service_attendance_first %>% 
+  replace_with_na_at("feedback_rating", ~.x < 0) %>%
+  group_by(user_id) %>% 
+  arrange(checkin_time) %>%
+  mutate(time_gap = as.numeric(checkin_time-lag(checkin_time), units = 'secs')) %>% # calculate time span between two logs for each user
+  summarize(ce_total_serv=n(),
+            ce_mean_rat_serv = mean(feedback_rating, na.rm = T),
+            ce_sd_rat_serv = sd(feedback_rating, na.rm = T),
+            ce_max_rat_serv = my.max(feedback_rating),
+            ce_min_rat_serv = my.min(feedback_rating),
+            ce_mean_time_between_serv = mean(time_gap, na.rm = T),
+            ce_sd_time_between_serv = sd(time_gap, na.rm = T),
+            ce_max_time_between_serv = my.max(time_gap),
+            ce_min_time_between_serv = my.min(time_gap),
+            ce_IQR_time_between_serv = IQR(time_gap, na.rm = T),
+            ce_skew_time_between_serv = skewness(time_gap, na.rm = T),
+            ce_kurt_time_between_serv = kurtosis(time_gap, na.rm = T))
+
+# Entropy of wall comments written
+feat_entropy_serv_att_f <- service_attendance_first %>%
+  group_by(user_id, service_id) %>%
+  summarize(visits_per_service = n()) %>%
+  group_by(user_id) %>%
+  summarize(ce_entropy_serv_att = entropy.MillerMadow(visits_per_service))
+```
+
+### Courses students added
+
+We see that the courses added only seem to have been registered for the 2018 cohort. Therefore, we do not calculate the features based on `user_added_course`.
+The code below is therefore commented out. Should we at some point get the full data set, we can include it in the feature calculation again.
+
+Classification of logs as during or outside of first term:
+```{r joint set courses}
+# Create a joint data set containing term of admission
+# user_added_course_retention <- join_df_retention(user_added_course, join_by = "user_id")
+# # Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+# user_added_course_first <- mutate_var_in_firstterm(user_added_course_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat courses}
+# feat_add_cour_f <- user_added_course_first %>%
+#   group_by(user_id) %>% 
+#   summarize(ae_total_cour_add=n())
+```
+
+### User campus event (event user added to calendar)
+
+Classification of logs as during or outside of first term:
+```{r joint set camp ev}
+# Create a joint data set containing term of admission
+user_campus_event_retention <- join_df_retention(user_campus_event, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+user_campus_event_first <- mutate_var_in_firstterm(user_campus_event_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat camp ev}
+feat_user_camp_ev_f <- user_campus_event_first %>% 
+  group_by(user_id) %>% 
+  summarize(ae_total_ev_followed = n())
+```
+
+### Viewed campus event
+
+Classification of logs as during or outside of first term:
+```{r joint set view camp ev}
+# Create a joint data set containing term of admission
+viewed_campus_event_retention <- join_df_retention(viewed_campus_event, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+viewed_campus_event_first <- mutate_var_in_firstterm(viewed_campus_event_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat view camp ev}
+viewed_campus_event_first <- viewed_campus_event_first %>%
+  group_by(user_id) %>%
+  arrange(date_created) %>%
+  mutate(time_gap = as.numeric(date_created-lag(date_created), units = 'mins')) %>% # calculate time span between two logs for each user
+  filter(time_gap > 1) %>% #exclude all log entries that occured less than one minute after the preceeding log entry for the same person
+  mutate(Date = as.Date(date_created))
+
+feat_view_camp_ev_f <- viewed_campus_event_first %>%
+  summarize(ae_total_view_ev = n(), #number of views
+            ae_total_days_view_ev = n_distinct(Date)) #number of days with view(s)
+```
+
+Basic modelling and coefficient extraction to use as feature:
+```{r}
+# extract slope from regression of view of campus events on date (all dates used, total_view_ev = 0 at days without log)
+feat_slope_view_campev <- my.slopeExtraction(df = viewed_campus_event_first, date_var = Date, feat_name = "ae_coef_view_campev")
+```
+
+### Viewed club
+
+Classification of logs as during or outside of first term:
+```{r joint set view club}
+# Create a joint data set containing term of admission
+viewed_club_retention <- join_df_retention(viewed_club, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+viewed_club_first <- mutate_var_in_firstterm(viewed_club_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat view club}
+viewed_club_first <- viewed_club_first %>%
+  group_by(user_id) %>%
+  arrange(date_created) %>%
+  mutate(time_gap = as.numeric(date_created-lag(date_created), units = 'mins')) %>% # calculate time span between two logs for each user
+  filter(time_gap > 1) %>% #exclude all log entries that occured less than one minute after the preceeding log entry for the same person
+  mutate(Date = as.Date(date_created))
+
+feat_view_club_f <- viewed_club_first %>%
+  summarize(ae_total_view_club = n(), #number of views
+            ae_total_days_view_club = n_distinct(Date)) #number of days with view(s)
+```
+
+Basic modelling and coefficient extraction to use as feature:
+```{r}
+# extract slope from regression of view of clubs on date (all dates used, total_view_club = 0 at days without log)
+feat_slope_view_club <- my.slopeExtraction(df = viewed_club_first, date_var = Date, feat_name = "ae_coef_view_club")
+```
+
+### Viewed user profile
+
+Classification of logs as during or outside of first term:
+```{r joint set view prfl}
+# Create a joint data set containing term of admission
+viewed_user_profile_retention <- join_df_retention(viewed_user_profile, join_by = "user_id")
+# Add column classifying each row into firstterm and not firstterm and filter for logs from first term
+viewed_user_profile_first <- mutate_var_in_firstterm(viewed_user_profile_retention, date_created) %>% filter(in_firstterm == "firstterm")
+```
+Feature extraction:
+```{r feat view prfl}
+viewed_user_profile_first <- viewed_user_profile_first %>%
+  group_by(user_id) %>%
+  arrange(date_created) %>%
+  mutate(time_gap = as.numeric(date_created-lag(date_created), units = 'mins')) %>% # calculate time span between two logs for each user
+  filter(time_gap > 1) %>% #exclude all log entries that occured less than one minute after the preceeding log entry for the same person
+  mutate(Date = as.Date(date_created))
+
+feat_view_us_prfl_f <- viewed_user_profile_first %>%
+  summarize(ae_total_view_prfl = n(), #number of views
+            ae_total_days_view_prfl = n_distinct(Date)) #number of days with view(s)
+
+# not enough clicks on home tab p.P. to model regresison
+```
+
+
+## Combinations of multiple data sets to extract composite features
+
+### Measure of active engagement
+*How regularly does a user actively use the app or checks in at an event with it?*
+```{r}
+# get time for all data sets with active user actions user_id and time log
+campus_event_attendance_date <- campus_event_attendance_first %>% select(user_id, checkin_time) %>% rename("date_created" = "checkin_time")
+campus_wall_comment_date <- campus_wall_comment_first %>% select(user_id, date_created)
+campus_wall_comment_like_date <- campus_wall_comment_like_first %>% select(user_id, date_created)
+campus_wall_post_date <- campus_wall_post_first %>% select(user_id, date_created)
+campus_wall_post_like_date <- campus_wall_post_like_first %>% select(user_id, date_created)
+chat_message_date <- chat_message_first %>% select(sender_id, date_created) %>% rename("user_id" = "sender_id")
+clicked_campus_guide_tab_date <- clicked_campus_guide_tab_first %>% select(user_id, date_created)
+clicked_community_tab_date <- clicked_community_tab_first %>% select(user_id, date_created)
+clicked_home_tab_date <- clicked_home_tab_first %>% select(user_id, date_created)
+clicked_notifications_tab_date <- clicked_notifications_tab_first %>% select(user_id, date_created)
+clicked_profile_tab_date <- clicked_profile_tab_first %>% select(user_id, date_created)
+clicked_tile_date <- clicked_tile_first %>% select(user_id, date_created)
+friend_request_date <- friend_request_first %>% select(sender_id, date_created) %>% rename("user_id" = "sender_id")
+# orientation_event_attendance_date <- orientation_event_attendance_first %>% select(user_id, checkin_time) %>% rename("date_created" = "checkin_time")
+performed_search_date <- performed_search_first %>% select(user_id, date_created)
+service_attendance_date <- service_attendance_first %>% select(user_id, checkin_time) %>% rename("date_created" = "checkin_time")
+social_group_member_date <- social_group_member_first %>% select(user_id, date_created)
+social_group_comment_date <- social_group_comment_first %>% select(user_id, date_created)
+social_group_comment_like_date <- social_group_comment_like_first %>% select(user_id, date_created)
+social_group_post_date <- social_group_post_first %>% select(user_id, date_created)
+social_group_post_like_date <- social_group_post_like_first %>% select(user_id, date_created)
+# user_added_course_date <- user_added_course_first %>% select(user_id, date_created)
+viewed_campus_event_date <- viewed_campus_event_first %>% select(user_id, date_created)
+viewed_club_date <- viewed_club_first %>% select(user_id, date_created)
+viewed_user_profile_date <- viewed_user_profile_first %>% select(user_id, date_created)
+user_campus_event_date <- user_campus_event_first %>% select(user_id, date_created)
+
+# combine to one df with two columns (user_id, time log)
+part_engagement <- full_join(campus_event_attendance_date, campus_wall_comment_date)
+part_engagement <- full_join(part_engagement, campus_wall_comment_like_date)
+part_engagement <- full_join(part_engagement, campus_wall_post_date)
+part_engagement <- full_join(part_engagement, campus_wall_post_like_date)
+part_engagement <- full_join(part_engagement, chat_message_date)
+part_engagement <- full_join(part_engagement, clicked_campus_guide_tab_date)
+part_engagement <- full_join(part_engagement, clicked_community_tab_date)
+part_engagement <- full_join(part_engagement, clicked_home_tab_date)
+part_engagement <- full_join(part_engagement, clicked_notifications_tab_date)
+part_engagement <- full_join(part_engagement, clicked_profile_tab_date)
+part_engagement <- full_join(part_engagement, clicked_tile_date)
+part_engagement <- full_join(part_engagement, friend_request_date)
+# part_engagement <- full_join(part_engagement, orientation_event_attendance_date)
+part_engagement <- full_join(part_engagement, performed_search_date)
+part_engagement <- full_join(part_engagement, service_attendance_date)
+part_engagement <- full_join(part_engagement, social_group_member_date)
+part_engagement <- full_join(part_engagement, social_group_comment_date)
+part_engagement <- full_join(part_engagement, social_group_comment_like_date)
+part_engagement <- full_join(part_engagement, social_group_post_date)
+part_engagement <- full_join(part_engagement, social_group_post_like_date)
+# part_engagement <- full_join(part_engagement, user_added_course_date)
+part_engagement <- full_join(part_engagement, viewed_campus_event_date)
+part_engagement <- full_join(part_engagement, viewed_club_date)
+part_engagement <- full_join(part_engagement, viewed_user_profile_date)
+all_engagement <- full_join(part_engagement, user_campus_event_date)
+```
+
+Data set preparation:
+```{r}
+# Feature extraction: overall active engagement time gap
+all_engagement <- all_engagement %>%
+  group_by(user_id) %>% # per person
+  arrange(date_created) %>% # sort by app open time to calculate time span
+  mutate(time_gap = as.numeric(date_created-lag(date_created), units = 'secs'), # calculate time span between two logs for each user
+         engagement_weekdays = wday(date_created, week_start = getOption("lubridate.week.start", 7))) %>% # add column identifying the weekdays of use (0-7 starting on Sunday)
+  mutate(date = as.Date(date_created))
+```
+
+Feature extraction
+```{r}
+feat_all_engagement <- all_engagement %>%
+  group_by(user_id) %>% # per person
+  summarize(ce_total_active_days = n_distinct(date), # all different dates a user actively used the app or attended an event registering with the app
+            ce_total_actions = n(), # total number of times user actively used the app or attended an event registering with the app
+            ce_mean_time_between_actions = mean(time_gap, na.rm = T), # mean time passed between two activites
+            ce_sd_time_between_actions = sd(time_gap, na.rm = T),
+            ce_max_time_between_actions = my.max(time_gap),
+            ce_IQR_time_between_actions = IQR(time_gap, na.rm = T),
+            ce_skew_time_between_actions = skewness(time_gap, na.rm = T),
+            ce_kurt_time_between_actions = kurtosis(time_gap, na.rm = T))
+
+# Extract features for weekday use only
+engagement_weekday_f <- all_engagement %>%
+  mutate(time = hms::as_hms(date_created)) %>%
+  filter(engagement_weekdays != 1, engagement_weekdays != 7, !(engagement_weekdays == 6 & time >= hms('18:00:00'))) %>% #exclude Saturday, Sunday and Friday after 6pm
+  group_by(user_id) %>% #per person
+  summarize(ce_total_active_weekdays = n_distinct(date, na.rm = T),
+            ce_total_actions_weekdays = n(),
+            ce_mean_time_between_actions_weekdays = mean(time_gap, na.rm = T), # mean time passed between two activites
+            ce_sd_time_between_actions_weekdays = sd(time_gap, na.rm = T),
+            ce_max_time_between_actions_weekdays = my.max(time_gap),
+            ce_IQR_time_between_actions_weekdays = IQR(time_gap, na.rm = T),
+            ce_skew_time_between_actions_weekdays = skewness(time_gap, na.rm = T),
+            ce_kurt_time_between_actions_weekdays = kurtosis(time_gap, na.rm = T))
+
+# Extract features for weekend use only
+engagement_weekend_f <- all_engagement %>%
+  mutate(time = hms::as_hms(date_created)) %>%
+  filter(engagement_weekdays == 1 | engagement_weekdays == 7 | (engagement_weekdays == 6 & time >= hms('18:00:00'))) %>% #exclude all weekdays to only keep Saturday, Sunday and Friday from 6 pm
+  group_by(user_id) %>% #per person
+  summarize(ce_total_active_weekend = n_distinct(date, na.rm = T),
+            ce_total_actions_weekend = n(),
+            ce_mean_time_between_actions_weekend = mean(time_gap, na.rm = T), # mean time passed between two activites
+            ce_sd_time_between_actions_weekend = sd(time_gap, na.rm = T),
+            ce_max_time_between_actions_weekend = my.max(time_gap),
+            ce_IQR_time_between_actions_weekend = IQR(time_gap, na.rm = T),
+            ce_skew_time_between_actions_weekend = skewness(time_gap, na.rm = T),
+            ce_kurt_time_between_actions_weekend = kurtosis(time_gap, na.rm = T))
+
+# join separate dfs
+engagement_week_f <- full_join(engagement_weekday_f, engagement_weekend_f, by = "user_id")
+
+# save all features for which NA is supposed to be replaced with 0
+engagement_week_f_rep = grep(colnames(engagement_week_f), pattern = "_total_", value = TRUE)
+engagement_week_f_rep = c(engagement_week_f_rep, grep(colnames(engagement_week_f), pattern = "_mean_", value = TRUE))
+engagement_week_f_rep = c(engagement_week_f_rep, grep(colnames(engagement_week_f), pattern = "_max_", value = TRUE))
+engagement_week_f_rep = c(engagement_week_f_rep, grep(colnames(engagement_week_f), pattern = "_IQR_", value = TRUE))
+
+# replace NAs in selected features with zeros
+engagement_week_f[engagement_week_f_rep][is.na(engagement_week_f[engagement_week_f_rep])] = 0
+
+# create final feature set and add some composite features (ratio between weekday and weekend use)
+feat_engagement_week_f <- engagement_week_f %>%
+  mutate(ce_ratio_active_days_weekday_to_weekend = ce_total_active_weekdays / ce_total_active_weekend,
+         ce_ratio_total_actions_weekday_to_weekend = ce_total_actions_weekdays / ce_total_actions_weekend,
+         ce_ratio_mean_time_between_actions_weekday_to_weekend = ce_mean_time_between_actions_weekdays / ce_mean_time_between_actions_weekend) %>%
+  mutate(ce_ratio_active_days_weekday_to_weekend = na_if(ce_ratio_active_days_weekday_to_weekend, 'Inf'),
+         ce_ratio_total_actions_weekday_to_weekend = na_if(ce_ratio_total_actions_weekday_to_weekend, 'Inf'),
+         ce_ratio_mean_time_between_actions_weekday_to_weekend = na_if(ce_ratio_mean_time_between_actions_weekday_to_weekend, 'Inf'))
+```
+Basic modelling and coefficient extraction to use as feature:
+```{r}
+# extract slope from regression of actions on date (all dates used, actions = 0 at days without use)
+feat_slope_actions <- my.slopeExtraction(df= all_engagement, date_var = date, feat_name = "ce_coef_actions")
+```
+
+### Non-time-related composite features
+
+*How many friends on average attended a campus event/service together with a user?*
+Campus events
+```{r}
+## All friends of each user
+#create df with all users and all their friends, regardless of whether request was sent or received
+friends_per_user_flat <- friend_request_first %>%
+  select(sender_id, receiver_id) %>%
+  group_by(sender_id) %>%
+  setnames(c("sender_id","receiver_id"),c("receiver_id","sender_id")) %>%
+  bind_rows(.,select(friend_request_first, sender_id, receiver_id)) %>%
+  setnames(c("sender_id","receiver_id"),c("user_id","friend_id")) %>%
+  group_by(user_id)
+
+# # nest it into lists
+# friends_per_user <- friends_per_user_flat %>% tidyr::nest(.,"friends_list" = friend_id) #%>% tidyr::unnest(friends_list)
+
+
+## Number of friends that were with a user at an event
+feat_friends_at_event_f <- campus_event_attendance_first %>%
+  select(campus_event_id, user_id) %>%
+  rename("attendee" = "user_id") %>%
+  full_join(.,select(campus_event_attendance_first, campus_event_id, user_id)) %>% #join with df again to have all events with all attendees and their co-attendees
+  filter(user_id != attendee) %>% #get rid of rows with same user id
+  mutate(are_friends = ifelse(is.na(match(paste0(.$user_id, .$attendee), paste0(friends_per_user_flat$user_id, friends_per_user_flat$friend_id))), FALSE, TRUE)) %>% #check whether people are friends by using the friends data set and past TRUE if they are friends
+  group_by(campus_event_id, user_id) %>%
+  summarize(total_friends_at_each_event = count_if(TRUE, are_friends)) %>% #number of friends at each event
+  group_by(user_id) %>%
+  summarize(ce_total_friends_at_events = sum(total_friends_at_each_event), #total number of friends at events
+            ce_mean_friends_at_events = mean(total_friends_at_each_event, na.rm = T),
+            ce_sd_friends_at_events = sd(total_friends_at_each_event, na.rm = T),
+            ce_max_friends_at_events = my.max(total_friends_at_each_event),
+            ce_min_friends_at_events = my.min(total_friends_at_each_event),
+            ce_skew_friends_at_events = skewness(total_friends_at_each_event, na.rm = T),
+            ce_kurt_friends_at_events = kurtosis(total_friends_at_each_event, na.rm = T))
+            
+         
+# ## All events of each user
+# events_per_user_f <- campus_event_attendance_first %>%
+#   select(campus_event_id, user_id) %>%
+#   group_by(user_id) %>%
+#   tidyr::nest() %>%
+#   rename("event_ids" = "data")
+# 
+# ## All users of each event
+# users_per_event_f <- campus_event_attendance_first %>%
+#   select(campus_event_id, user_id) %>%
+#   group_by(campus_event_id) %>%
+#   tidyr::nest() %>%
+#   rename("user_ids" = "data")
+```
+Service
+```{r}
+## Number of friends that were with a user at a service
+feat_friends_at_service_f <- service_attendance_first %>%
+  select(service_id, user_id) %>%
+  rename("attendee" = "user_id") %>%
+  full_join(.,select(service_attendance_first, service_id, user_id)) %>%
+  filter(user_id != attendee) %>%
+  mutate(are_friends = ifelse(is.na(match(paste0(.$user_id, .$attendee), paste0(friends_per_user_flat$user_id, friends_per_user_flat$friend_id))), FALSE, TRUE)) %>%
+  group_by(service_id, user_id) %>%
+  summarize(total_friends_at_each_service = count_if(TRUE, are_friends)) %>% #number of friends at each event
+  group_by(user_id) %>%
+  summarize(ce_total_friends_at_services = sum(total_friends_at_each_service),
+            ce_mean_friends_at_services = mean(total_friends_at_each_service, na.rm = T),
+            ce_sd_friends_at_services = sd(total_friends_at_each_service, na.rm = T),
+            ce_max_friends_at_services = my.max(total_friends_at_each_service),
+            ce_min_friends_at_services = my.min(total_friends_at_each_service),
+            ce_skew_friends_at_services = skewness(total_friends_at_each_service, na.rm = T),
+            ce_kurt_friends_at_services = kurtosis(total_friends_at_each_service, na.rm = T))
+```
+
+*How many common social group members does a user have?*
+```{r}
+## All social group co-members of each user
+comSocGrpMembr_per_user_flat <- social_group_member_first %>%
+  select(user_id, social_group_id) %>%
+  setnames(c("user_id","social_group_id"),c("co_member","social_group_id")) %>%
+  full_join(.,select(social_group_member_first, user_id, social_group_id)) %>%
+  filter(user_id != co_member) %>%
+  group_by(user_id)
+  
+## Number of social group co-members of each user
+feat_comSocGrpMembr_f <- comSocGrpMembr_per_user_flat %>%
+  group_by(user_id, social_group_id) %>%
+  summarize(comSocGrpMembrs_perSocGrp = n()) %>% #number of social group co-members per group
+  group_by(user_id) %>%
+  summarize(ce_total_comSocGrpMembrs = sum(comSocGrpMembrs_perSocGrp), #total number of social group co-member in all groups
+            ce_mean_comSocGrpMembrs = mean(comSocGrpMembrs_perSocGrp, na.rm = T), #mean number of social group co-members per group
+            ce_sd_comSocGrpMembrs = sd(comSocGrpMembrs_perSocGrp, na.rm = T),
+            ce_max_comSocGrpMembrs = my.max(comSocGrpMembrs_perSocGrp),
+            ce_min_comSocGrpMembrs = my.min(comSocGrpMembrs_perSocGrp),
+            ce_skew_comSocGrpMembrs = skewness(comSocGrpMembrs_perSocGrp, na.rm = T),
+            ce_kurt_comSocGrpMembrs = kurtosis(comSocGrpMembrs_perSocGrp, na.rm = T))
+```
+
+*How many common social group members atteneded a campus event/service together with a user?*
+Campus events
+```{r}
+## Number of social group co-members that were with a user at an event
+feat_comSocGrpMembr_at_event_f <- campus_event_attendance_first %>%
+  select(campus_event_id, user_id) %>%
+  rename("attendee" = "user_id") %>%
+  full_join(.,select(campus_event_attendance_first, user_id, campus_event_id)) %>%
+  filter(user_id != attendee) %>%
+  mutate(are_co_members = ifelse(is.na(match(paste0(.$user_id, .$attendee), paste0(comSocGrpMembr_per_user_flat$user_id, comSocGrpMembr_per_user_flat$co_member))), FALSE, TRUE)) %>%
+  group_by(campus_event_id, user_id) %>%
+  summarize(total_SocGrpMembr_at_each_event = count_if(TRUE, are_co_members)) %>%
+  group_by(user_id) %>%
+  summarize(ce_total_comembers_at_events = sum(total_SocGrpMembr_at_each_event),
+            ce_mean_comembers_at_events = mean(total_SocGrpMembr_at_each_event, na.rm = T),
+            ce_sd_comembers_at_events = sd(total_SocGrpMembr_at_each_event, na.rm = T),
+            ce_max_comembers_at_events = my.max(total_SocGrpMembr_at_each_event),
+            ce_min_comembers_at_events = my.min(total_SocGrpMembr_at_each_event),
+            ce_skew_comembers_at_events = skewness(total_SocGrpMembr_at_each_event, na.rm = T),
+            ce_kurt_comembers_at_events = kurtosis(total_SocGrpMembr_at_each_event, na.rm = T))
+
+# ## All social groups of a user
+# User_per_SocGrp_flat <- social_group_member_first %>%
+#   group_by(social_group_id, user_id)
+# User_per_SocGrp <- User_per_SocGrp_flat %>% tidyr::nest()
+# 
+# ## All user of a social group
+# SocGrp_per_user_flat <- social_group_member_first %>%
+#   group_by(user_id, social_group_id) %>%
+#   summarize()
+# SocGrp_per_user <- SocGrp_per_user_flat %>% tidyr::nest()
+```
+Service
+```{r}
+## Number of friends that were with a user at a service
+feat_comSocGrpMembr_at_service_f <- service_attendance_first %>%
+  select(service_id, user_id) %>%
+  rename("attendee" = "user_id") %>%
+  full_join(.,select(service_attendance_first, service_id, user_id)) %>%
+  filter(user_id != attendee) %>%
+  mutate(are_co_members = ifelse(is.na(match(paste0(.$user_id, .$attendee), paste0(comSocGrpMembr_per_user_flat$user_id, comSocGrpMembr_per_user_flat$co_member))), FALSE, TRUE)) %>%
+  group_by(service_id, user_id) %>%
+  summarize(total_SocGrpMembr_at_each_service = count_if(TRUE, are_co_members)) %>%
+  group_by(user_id) %>%
+  summarize(ce_total_comembers_at_services = sum(total_SocGrpMembr_at_each_service),
+            ce_mean_comembers_at_services = mean(total_SocGrpMembr_at_each_service, na.rm = T),
+            ce_sd_comembers_at_services = sd(total_SocGrpMembr_at_each_service, na.rm = T),
+            ce_max_comembers_at_services = my.max(total_SocGrpMembr_at_each_service),
+            ce_min_comembers_at_services = my.min(total_SocGrpMembr_at_each_service),
+            ce_skew_comembers_at_services = skewness(total_SocGrpMembr_at_each_service, na.rm = T),
+            ce_kurt_comembers_at_services = kurtosis(total_SocGrpMembr_at_each_service, na.rm = T))
+```
+
+*How many friends did somebody sent messages to and how many non friends?*
+```{r}
+# add column classfying message as between friends or not
+messages_with_friends_f <- chat_message_first %>%
+  select(sender_id, receiver_id) %>%
+  mutate(are_friends = ifelse(is.na(match(paste0(.$sender_id, .$receiver_id), paste0(friends_per_user_flat$user_id, friends_per_user_flat$friend_id))), FALSE, TRUE)) %>%
+  group_by(sender_id, receiver_id) %>%
+  summarize(total_msg_onefrnd = count_if(TRUE, are_friends),
+            total_msg_oneNofrnd = count_if(FALSE, are_friends))
+
+# get features for sender
+messages_to_friends_f <- messages_with_friends_f %>%
+  group_by(sender_id) %>%
+  summarize(ce_total_friends_messaged = count_if(0, total_msg_oneNofrnd), #number of friends that student messaged 
+            ce_total_nofriends_messaged = count_if(0, total_msg_onefrnd), #number of non-friends that student messaged 
+            ce_total_msg_to_friends = sum(total_msg_onefrnd),
+            ce_mean_msg_to_friends = mean(total_msg_onefrnd, na.rm = T),
+            ce_sd_msg_to_friends = sd(total_msg_onefrnd, na.rm = T),
+            ce_max_msg_to_friends = my.max(total_msg_onefrnd),
+            ce_min_msg_to_friends = my.min(total_msg_onefrnd),
+            ce_skew_msg_to_friends = skewness(total_msg_onefrnd, na.rm = T),
+            ce_kurt_msg_to_friends = kurtosis(total_msg_onefrnd, na.rm = T),
+            ce_total_msg_to_Nofriends = sum(total_msg_oneNofrnd),
+            ce_mean_msg_to_Nofriends = mean(total_msg_oneNofrnd, na.rm = T),
+            ce_sd_msg_to_Nofriends = sd(total_msg_oneNofrnd, na.rm = T),
+            ce_max_msg_to_Nofriends = my.max(total_msg_oneNofrnd),
+            ce_min_msg_to_Nofriends = my.min(total_msg_oneNofrnd),
+            ce_skew_msg_to_Nofriends = skewness(total_msg_oneNofrnd, na.rm = T),
+            ce_kurt_msg_to_Nofriends = kurtosis(total_msg_oneNofrnd, na.rm = T)) %>%
+  mutate(ce_ratio_msgtofrnd_to_msgtoNofrnd = ce_total_msg_to_friends / ce_total_msg_to_Nofriends)%>% 
+  mutate(ce_ratio_msgtofrnd_to_msgtoNofrnd = na_if(ce_ratio_msgtofrnd_to_msgtoNofrnd, 'Inf')) %>%  
+  rename("user_id" = "sender_id")
+
+# get features for receivers
+messages_from_friends_f <- messages_with_friends_f %>%
+  group_by(receiver_id) %>%
+  summarize(ce_total_friends_gottenmsg = count_if(0, total_msg_oneNofrnd), #get number of friends that messaged student  
+            ce_total_nofriends_gottenmsg = count_if(0, total_msg_onefrnd), #get number of non-friends that messaged student  
+            ce_total_msg_from_friends = sum(total_msg_onefrnd),
+            ce_mean_msg_from_friends = mean(total_msg_onefrnd, na.rm = T),
+            ce_sd_msg_from_friends = sd(total_msg_onefrnd, na.rm = T),
+            ce_max_msg_from_friends = my.max(total_msg_onefrnd),
+            ce_min_msg_from_friends = my.min(total_msg_onefrnd),
+            ce_skew_msg_from_friends = skewness(total_msg_onefrnd, na.rm = T),
+            ce_kurt_msg_from_friends = kurtosis(total_msg_onefrnd, na.rm = T),
+            ce_total_msg_from_Nofriends = sum(total_msg_oneNofrnd),
+            ce_mean_msg_from_Nofriends = mean(total_msg_oneNofrnd, na.rm = T),
+            ce_sd_msg_from_Nofriends = sd(total_msg_oneNofrnd, na.rm = T),
+            ce_max_msg_from_Nofriends = my.max(total_msg_oneNofrnd),
+            ce_min_msg_from_Nofriends = my.min(total_msg_oneNofrnd),
+            ce_skew_msg_from_Nofriends = skewness(total_msg_oneNofrnd, na.rm = T),
+            ce_kurt_msg_from_Nofriends = kurtosis(total_msg_oneNofrnd, na.rm = T)) %>%
+  mutate(ce_ratio_msgfromfrnd_to_msgfromNofrnd = ce_total_msg_from_friends / ce_total_msg_from_Nofriends) %>% 
+  mutate(ce_ratio_msgfromfrnd_to_msgfromNofrnd = na_if(ce_ratio_msgfromfrnd_to_msgfromNofrnd, 'Inf')) %>%
+  rename("user_id" = "receiver_id")
+
+# join into one df
+feat_messages_with_friends_f <- full_join(messages_to_friends_f, messages_from_friends_f, by = "user_id")
+
+# save all features for which NA is supposed to be replaced with 0
+feat_messages_with_friends_f_rep = grep(colnames(feat_messages_with_friends_f), pattern = "_total_", value = TRUE)
+feat_messages_with_friends_f_rep = c(feat_messages_with_friends_f_rep, grep(colnames(feat_messages_with_friends_f), pattern = "_mean_", value = TRUE))
+feat_messages_with_friends_f_rep = c(feat_messages_with_friends_f_rep, grep(colnames(feat_messages_with_friends_f), pattern = "_max_", value = TRUE))
+feat_messages_with_friends_f_rep = c(feat_messages_with_friends_f_rep, grep(colnames(feat_messages_with_friends_f), pattern = "_min_", value = TRUE))
+# replace NAs in selected features with zeros
+feat_messages_with_friends_f[feat_messages_with_friends_f_rep][is.na(feat_messages_with_friends_f[feat_messages_with_friends_f_rep])] = 0
+```
+
+*How many posts did somebody post in total on campus wall and social groups?*
+```{r}
+posts_all_f <- full_join(feat_camp_wl_post_f, feat_soc_grp_post_f, by = "user_id")
+
+# save all features for which NA is supposed to be replaced with 0
+posts_all_f_rep = grep(colnames(posts_all_f), pattern = "_total_", value = TRUE)
+posts_all_f_rep = c(posts_all_f_rep, grep(colnames(posts_all_f), pattern = "_mean_", value = TRUE))
+posts_all_f_rep = c(posts_all_f_rep, grep(colnames(posts_all_f), pattern = "_max_", value = TRUE))
+posts_all_f_rep = c(posts_all_f_rep, grep(colnames(posts_all_f), pattern = "_min_", value = TRUE))
+posts_all_f_rep = c(posts_all_f_rep, grep(colnames(posts_all_f), pattern = "_IQR_", value = TRUE))
+
+# replace NAs in selected features with zeros
+posts_all_f[posts_all_f_rep][is.na(posts_all_f[posts_all_f_rep])] = 0
+
+
+feat_posts_all_f <- posts_all_f %>%
+  group_by(user_id) %>%
+  summarize(ce_total_posts = ce_total_post_wl + ce_total_post_sg) #number of posts on wall and in social group
+```
+
+*How many comments did somebody write in total on campus wall posts and on social groups posts?*
+```{r}
+com_all_f <- full_join(feat_camp_wl_com_f, feat_soc_grp_com_f, by = "user_id")
+
+# save all features for which NA is supposed to be replaced with 0
+com_all_f_rep = grep(colnames(com_all_f), pattern = "_total_", value = TRUE)
+com_all_f_rep = c(com_all_f_rep, grep(colnames(com_all_f), pattern = "_mean_", value = TRUE))
+com_all_f_rep = c(com_all_f_rep, grep(colnames(com_all_f), pattern = "_max_", value = TRUE))
+com_all_f_rep = c(com_all_f_rep, grep(colnames(com_all_f), pattern = "_min_", value = TRUE))
+
+# replace NAs in selected features with zeros
+com_all_f[com_all_f_rep][is.na(com_all_f[com_all_f_rep])] = 0
+
+
+feat_com_all_f <- com_all_f %>%
+  group_by(user_id) %>%
+  summarize(ce_total_coms = ce_total_com_post_wl + ce_total_com_post_sg) #number of comments on wall and in social group
+```
+
+*What is the ratio of post and comments in total?*
+```{r}
+post_com_all_f <- inner_join(feat_posts_all_f, feat_com_all_f, by= 'user_id')
+head(post_com_all_f)
+colSums(is.na(post_com_all_f))
+
+feat_post_com_all_ratio_f <- post_com_all_f %>%
+  group_by(user_id) %>%
+  summarize(ce_ratio_posttocom_all = ce_total_posts/ce_total_coms) #ratio of posts to comments
+```
+
+*What is the ratio of chat messages sent/received/total to posts/comments made on campus wall?*
+```{r} 
+# Posts
+chat_msg_wlpost_f <- inner_join(feat_total_messages_f, feat_camp_wl_post_f, by = "user_id")
+
+feat_chat_msg_wlpost_f <- chat_msg_wlpost_f %>%
+  group_by(user_id) %>%
+  summarize(ce_ratio_msgrec_to_postwl = ce_total_chat_msg_rec/ ce_total_post_wl,
+            ce_ratio_msgsent_to_postwl = ce_total_chat_msg_sent/ ce_total_post_wl,
+            ce_ratio_msg_to_postwl = (ce_total_chat_msg_rec + ce_total_chat_msg_sent) / ce_total_post_wl) %>%
+  mutate(ce_ratio_msgrec_to_postwl = na_if(ce_ratio_msgrec_to_postwl, 'Inf'),
+         ce_ratio_msgsent_to_postwl = na_if(ce_ratio_msgsent_to_postwl, 'Inf'),
+         ce_ratio_msg_to_postwl = na_if(ce_ratio_msg_to_postwl, 'Inf'))
+
+
+# Comments
+chat_msg_wlcom_f <- inner_join(feat_total_messages_f, feat_camp_wl_com_f, by = "user_id")
+
+feat_chat_msg_wlcom_f <- chat_msg_wlcom_f %>%
+  group_by(user_id) %>%
+  summarize(ce_ratio_msgrec_to_postwlcom = ce_total_chat_msg_rec/ ce_total_com_post_wl,
+            ce_ratio_msgsent_to_postwlcom = ce_total_chat_msg_sent/ ce_total_com_post_wl,
+            ce_ratio_msg_to_postwlcom = (ce_total_chat_msg_rec + ce_total_chat_msg_sent) / ce_total_com_post_wl) %>%
+  mutate(ce_ratio_msgrec_to_postwlcom = na_if(ce_ratio_msgrec_to_postwlcom, 'Inf'),
+         ce_ratio_msgsent_to_postwlcom = na_if(ce_ratio_msgsent_to_postwlcom, 'Inf'),
+         ce_ratio_msg_to_postwlcom = na_if(ce_ratio_msg_to_postwlcom, 'Inf'))
+```
+
+*What is the ratio of chat messages sent/received/total to posts/comments made in social groups?*
+```{r}
+# Posts
+chat_msg_sgpost_f <- inner_join(feat_total_messages_f, feat_soc_grp_post_f,by = "user_id")
+
+feat_chat_msg_sgpost_f <- chat_msg_sgpost_f %>%
+  group_by(user_id) %>%
+  summarize(ce_ratio_msgrec_to_postsg = ce_total_chat_msg_rec/ ce_total_post_sg,
+            ce_ratio_msgsent_to_postsg = ce_total_chat_msg_sent/ ce_total_post_sg,
+            ce_ratio_msg_to_postsg = (ce_total_chat_msg_rec + ce_total_chat_msg_sent) / ce_total_post_sg) %>%
+  mutate(ce_ratio_msgrec_to_postsg = na_if(ce_ratio_msgrec_to_postsg, 'Inf'),
+         ce_ratio_msgsent_to_postsg = na_if(ce_ratio_msgsent_to_postsg, 'Inf'),
+         ce_ratio_msg_to_postsg = na_if(ce_ratio_msg_to_postsg, 'Inf'))
+
+
+# Comments
+chat_msg_sgcom_f <- inner_join(feat_total_messages_f, feat_soc_grp_com_f, by = "user_id")
+
+feat_chat_msg_sgcom_f <- chat_msg_sgcom_f %>%
+  group_by(user_id) %>%
+  summarize(ce_ratio_msgrec_to_postsgcom = ce_total_chat_msg_rec/ ce_total_com_post_sg,
+            ce_ratio_msgsent_to_postsgcom = ce_total_chat_msg_sent/ ce_total_com_post_sg,
+            ce_ratio_msg_to_postsgcom = (ce_total_chat_msg_rec + ce_total_chat_msg_sent)/ ce_total_com_post_sg) %>%
+  mutate(ce_ratio_msgrec_to_postsgcom = na_if(ce_ratio_msgrec_to_postsgcom, 'Inf'),
+         ce_ratio_msgsent_to_postsgcom = na_if(ce_ratio_msgsent_to_postsgcom, 'Inf'),
+         ce_ratio_msg_to_postsgcom = na_if(ce_ratio_msg_to_postsgcom, 'Inf'))
+```
+
+*What is the ratio of the number of friend requests sent/received/in total to the number of likes given on posts/on comments?*
+```{r}
+# Posts
+frnd_wlpost_f <- inner_join(feat_total_friends_f, feat_camp_wl_post_f,by = "user_id")
+
+feat_frnd_wlpost_f <- frnd_wlpost_f %>%
+  group_by(user_id) %>%
+  summarize(ce_ratio_frndrec_to_postwl = ce_total_frnd_req_rec/ ce_total_post_wl,
+            ce_ratio_frndsent_to_postwl = ce_total_frnd_req_sent/ ce_total_post_wl,
+            ce_ratio_frnd_to_postwl = (ce_total_frnd_req_rec + ce_total_frnd_req_sent)/ ce_total_post_wl) %>%
+  mutate(ce_ratio_frndrec_to_postwl = na_if(ce_ratio_frndrec_to_postwl, 'Inf'),
+         ce_ratio_frndsent_to_postwl = na_if(ce_ratio_frndsent_to_postwl, 'Inf'),
+         ce_ratio_frnd_to_postwl = na_if(ce_ratio_frnd_to_postwl, 'Inf'))
+
+# Comments
+frnd_wlcom_f <- inner_join(feat_total_friends_f, feat_camp_wl_com_f, by = "user_id")
+
+feat_frnd_wlcom_f <- frnd_wlcom_f %>%
+  group_by(user_id) %>%
+  summarize(ce_ratio_frndrec_to_postwlcom = ce_total_frnd_req_rec/ ce_total_com_post_wl,
+            ce_ratio_frndsent_to_postwlcom = ce_total_frnd_req_sent/ ce_total_com_post_wl,
+            ce_ratio_frnd_to_postwlcom = (ce_total_frnd_req_rec + ce_total_frnd_req_sent)/ ce_total_com_post_wl) %>%
+  mutate(ce_ratio_frndrec_to_postwlcom = na_if(ce_ratio_frndrec_to_postwlcom, 'Inf'),
+         ce_ratio_frndsent_to_postwlcom = na_if(ce_ratio_frndsent_to_postwlcom, 'Inf'),
+         ce_ratio_frnd_to_postwlcom = na_if(ce_ratio_frnd_to_postwlcom, 'Inf'))
+
+```
+
+*What is the ratio of chat messages sent/received/total to friend requests sent/received/total?*
+```{r}
+frnd_msg_f <- inner_join(feat_total_friends_f, total_messages_f,by = "user_id")
+
+feat_frnd_msg_f <- frnd_msg_f %>%
+  group_by(user_id) %>%
+  summarize(ce_ratio_frndrec_to_msgrec = ce_total_frnd_req_rec/ce_total_chat_msg_rec,
+            ce_ratio_frndrec_to_msgsent = ce_total_frnd_req_sent/ ce_total_chat_msg_sent,
+            ce_ratio_frndsent_to_msgrec = ce_total_frnd_req_rec/ ce_total_chat_msg_rec,
+            ce_ratio_frndsent_to_msgsent = ce_total_frnd_req_sent/ ce_total_chat_msg_sent,
+            ce_ratio_frnd_to_msg = (ce_total_frnd_req_rec + ce_total_frnd_req_sent)/(ce_total_chat_msg_rec + ce_total_chat_msg_sent)) %>%
+  mutate(ce_ratio_frndrec_to_msgrec = na_if(ce_ratio_frndrec_to_msgrec, 'Inf'), # turn infinite values into NA
+         ce_ratio_frndrec_to_msgsent = na_if(ce_ratio_frndrec_to_msgsent, 'Inf'),
+         ce_ratio_frndsent_to_msgrec = na_if(ce_ratio_frndsent_to_msgrec, 'Inf'),
+         ce_ratio_frndsent_to_msgsent = na_if(ce_ratio_frndsent_to_msgsent, 'Inf'),
+         ce_ratio_frnd_to_msg = na_if(ce_ratio_frnd_to_msg, 'Inf'))
+```
+
+*What type of event did somebody attend?*
+```{r}
+camp_ev_type <- inner_join(campus_event, campus_event_attendance_first, by = c("id" = "campus_event_id"))
+feat_camp_ev_type_f <- camp_ev_type %>%
+  group_by(user_id) %>%
+  replace_with_na_at("feedback_rating", ~.x < 0) %>%
+  summarize(ce_total_camp_ev_type_serv = count_if("service", host_type),
+            ce_total_camp_ev_type_club = count_if("club", host_type),
+            ce_total_camp_ev_title_or = count_if(expss::contains("Orientation", "orientation"), title)) %>% #count all events which have "Orientation" in the title
+  mutate(ce_ratio_camp_ev_type_serv_to_club = ce_total_camp_ev_type_serv / ce_total_camp_ev_type_club) %>%
+  mutate(ce_ratio_camp_ev_type_serv_to_club = na_if(ce_ratio_camp_ev_type_serv_to_club, 'Inf'))
+```
+
+*How many events campus event and services did somebody make use of in total?*
+```{r}
+ev_serv_f <- inner_join(feat_camp_ev_att_f, feat_serv_att_f, by = c("user_id"))
+feat_ev_serv_f <- ev_serv_f %>%
+  group_by(user_id) %>%
+  summarize(ce_total_ev_serv = ce_total_camp_ev + ce_total_serv,
+            ce_mean_rat_ev_serv = (ce_mean_rat_camp_ev + ce_mean_rat_serv) / 2, #mean rating of both
+            ce_sd_rat_ev_serv = (ce_sd_rat_camp_ev + ce_sd_rat_serv) / 2) #sd of rating of both
+```
+
+*How many campus, orientation and service events did somebody attend in total?*
+We had to leave out the orientation events (feat_or_ev_att_f) because the feature could not be calculated.
+```{r}
+ev_all_f <- full_join(feat_camp_ev_att_f, feat_serv_att_f, by = "user_id")
+
+# save all features for which NA is supposed to be replaced with 0
+ev_all_f_rep = grep(colnames(ev_all_f), pattern = "_total_", value = TRUE)
+ev_all_f_rep = c(ev_all_f_rep, grep(colnames(ev_all_f), pattern = "_mean_", value = TRUE))
+ev_all_f_rep = c(ev_all_f_rep, grep(colnames(ev_all_f), pattern = "_max_", value = TRUE))
+ev_all_f_rep = c(ev_all_f_rep, grep(colnames(ev_all_f), pattern = "_min_", value = TRUE))
+ev_all_f_rep = ev_all_f_rep[!grepl(pattern = "_mean_rat", ev_all_f_rep)] #remove mean ratings again, those are supposed to be imputed later
+ev_all_f_rep = ev_all_f_rep[!grepl(pattern = "_max_rat", ev_all_f_rep)]
+ev_all_f_rep = ev_all_f_rep[!grepl(pattern = "_min_rat", ev_all_f_rep)]
+
+# replace NAs in selected features with zeros
+ev_all_f[ev_all_f_rep][is.na(ev_all_f[ev_all_f_rep])] = 0
+
+
+feat_ev_all_f <- ev_all_f %>%
+  group_by(user_id) %>%
+  summarize(ce_total_ev = ce_total_camp_ev + ce_total_serv) # add ce_total_or_ev again once the feat_or_ev_att_f can be calculated
+```
+
+
+#### NLP Features from combined data
+*How many words does a user post/comment/feedback in the app and what is the basic sentiment of the words?*
+```{r}
+campus_event_attendance_text <- campus_event_attendance_first %>% select(user_id, feedback_text) %>% rename("feedback_text_camp_ev" = "feedback_text")
+campus_wall_comment_text <- campus_wall_comment_first %>% select(user_id, text) %>% rename("text_wl_com" = "text")
+campus_wall_post_text <- campus_wall_post_first %>% select(user_id, text) %>% rename("text_wl_post" = "text")
+social_group_comment_text <- social_group_comment_first %>% select(user_id, text) %>% rename("text_sg_com" = "text")
+social_group_post_text <- social_group_post_first %>% select(user_id, text) %>% rename("text_sg_post" = "text")
+service_attendance_text <- service_attendance_first %>% select(user_id, feedback_text) %>% rename("feedback_text_serv" = "feedback_text")
+
+part_text <- full_join(campus_event_attendance_text, campus_wall_comment_text)
+part_text <- full_join(part_text, campus_wall_post_text, by = "user_id")
+part_text <- full_join(part_text, social_group_comment_text, by = "user_id")
+part_text <- full_join(part_text, social_group_post_text, by = "user_id")
+all_text <- full_join(part_text, service_attendance_text, by = "user_id")
+
+all_text_col <- all_text %>%
+  group_by(user_id) %>%
+  mutate_at(c("feedback_text_camp_ev", "text_wl_com", "text_wl_post", "text_sg_com", "text_sg_post", "feedback_text_serv"), funs(replace(., duplicated(.), ""))) %>% #remove all duplicated text, so that each text is only in once
+  replace(is.na(.), "") %>% #replace all NA with nothing, so as not to have NA as text
+  summarise_all(funs(paste(., collapse = " "))) %>% #merge all text columns per person into once cell
+  unite(., all_text_comb, -user_id, sep = " ", remove = TRUE, na.rm = FALSE) 
+
+# feature extraction
+feat_all_text <- all_text_col %>%
+  tidytext::unnest_tokens(word, all_text_comb) %>% #spread df so that each word has its own row
+  anti_join(tidytext::stop_words) %>% #exclude "stop words"
+  left_join(tidytext::get_sentiments("nrc")) %>% #classify words in neg and pos by help of the NRC Word-Emotion Association Lexicon from Saif Mohammad and Peter Turney
+  group_by(user_id) %>%
+  summarize(ce_total_words = n(), #number of words
+            ce_total_different_words = n_distinct(word), #number of different words
+            ce_total_words_sentiment_pos = count_if("positive", sentiment), #number of positive words
+            ce_total_words_sentiment_neg = count_if("negative", sentiment), #number of negative words
+            ce_total_words_sentiment_joy = count_if("joy", sentiment), #number of words representing joy
+            ce_total_words_sentiment_anger = count_if("anger", sentiment),
+            ce_total_words_sentiment_anticipation = count_if("anticipation", sentiment),
+            ce_total_words_sentiment_disgust = count_if("disgust", sentiment),
+            ce_total_words_sentiment_fear = count_if("fear", sentiment),
+            ce_total_words_sentiment_sadness = count_if("sadness", sentiment),
+            ce_total_words_sentiment_surprise = count_if("surprise", sentiment),
+            ce_total_words_sentiment_trust = count_if("trust", sentiment)) %>%
+  mutate(ce_ratio_diff_words_to_all_words_all = ce_total_different_words/ce_total_words, #ratio of different to all words
+         ce_net_sentiment_all = ce_total_words_sentiment_pos - ce_total_words_sentiment_neg) %>% #net sentiment (pos-neg words)
+  mutate(ce_ratio_diff_words_to_all_words_all = na_if(ce_ratio_diff_words_to_all_words_all, 'Inf'))
+```
+
+
+### Time-related composite features
+
+*What is the time elapse between app registration and first friend request sent/first group joined/first event attended?*
+```{r} 
+#registration and friend request
+reg_frnd_f <- inner_join(download_and_registration, friend_request_first, by= c("user_id" = "sender_id"))
+feat_reg_frnd_f <- reg_frnd_f %>%
+  group_by(user_id) %>%
+  arrange(desc(date_created), .by_group=T) %>% #sort with the earliest date at the bottom for each group
+  filter(row_number()==n()) %>% #only keep the last row of each user to get the date of the first friend request sent
+  summarize(ce_reg_to_frndreqsent = difftime(date_created, registration_time, units = "secs")) %>% #calculate time difference between registration and first friend request
+  filter(ce_reg_to_frndreqsent > 0)
+
+#registration and first group joined
+reg_soc_grp_f <- inner_join(download_and_registration, social_group_member_first, by= "user_id")
+feat_reg_soc_grp_f <- reg_soc_grp_f %>%
+  group_by(user_id) %>%
+  arrange(desc(date_created), .by_group=T) %>%
+  filter(row_number()==n()) %>%
+  summarize(ce_reg_to_sg_mbr = difftime(date_created, registration_time, units = "secs")) %>%
+  filter(ce_reg_to_sg_mbr > 0)
+
+#registration and first campus event attended
+reg_camp_ev_f <- inner_join(download_and_registration, campus_event_attendance_first, by= "user_id")
+feat_reg_camp_ev_f <- reg_camp_ev_f %>%
+  group_by(user_id) %>%
+  arrange(desc(checkin_time), .by_group=T) %>%
+  filter(row_number()==n()) %>%
+  summarize(ce_reg_to_camp_ev_att = difftime(checkin_time, registration_time, units = "secs"))%>%
+  filter(ce_reg_to_camp_ev_att > 0)
+```
+
+*What is the time elapse between first friend request sent and first group joined/first event attended?*
+```{r}
+#first group joined and first friend request
+soc_grp_frnd_req_f <- inner_join(social_group_member_first, friend_request_first, by= c("user_id" = "sender_id"))
+feat_soc_grp_frnd_req_f <- soc_grp_frnd_req_f %>%
+  group_by(user_id) %>%
+  arrange(desc(date_created.x,date_created.y), .by_group=T) %>% #sort dates decending, the earliest time log for both social group membership and friend request at the bottom for each user
+  filter(row_number()==n()) %>% # keep only the last row of each user to get the first event joined with the wirth friend request sent
+  summarize(ce_sg_mbr_to_frndreqsent = difftime(date_created.y, date_created.x, units = "secs")) #calculate time difference between becoming a social group member and sending the first friend request
+
+#first campus event attended and first friend request
+camp_ev_frnd_req_f <- inner_join(campus_event_attendance_first, friend_request_first, by= c("user_id" = "sender_id"))
+feat_camp_ev_frnd_req_f <- camp_ev_frnd_req_f %>%
+  group_by(user_id) %>%
+  arrange(desc(checkin_time, date_created), .by_group=T) %>%
+  filter(row_number()==n()) %>%
+  summarize(ce_camp_ev_att_to_frndreqsent = difftime(date_created, checkin_time, units = "secs"))
+```
+
+*How many campus events a user followed did the user visit?*
+```{r}
+user_campus_event_att_f <- inner_join(user_campus_event_first, campus_event_attendance_first, by= c("user_id", "campus_event_id"))
+feat_user_campus_event_att_f <- user_campus_event_att_f %>%
+  group_by(user_id, campus_event_id) %>%
+  summarize(average_timediff_follow_to_goev = mean(difftime(checkin_time, date_created, units = "secs"), by = user_id)) %>%
+  filter(average_timediff_follow_to_goev > 0) %>% # only keep in positive differences: a person followed event first and participated afterwards
+  group_by(user_id) %>%
+  summarize(ce_total_ev_followed_att = n(), #total number of events a user followed and then visited
+            ce_average_timediff_follow_to_goev = mean(average_timediff_follow_to_goev)) #mean time gap between following and going to an event (if at all) 
+```
+
+*What is the time elapse between viewing a campus event and the participation in the same event?*
+```{r}
+view_camp_ev_att_f <- inner_join(viewed_campus_event_first, campus_event_attendance_first, by= c("user_id", "campus_event_id"))
+feat_view_camp_ev_att_f <- view_camp_ev_att_f %>%
+  group_by(user_id, campus_event_id) %>%
+  summarize(average_timediff_view_to_goev = mean(difftime(checkin_time, date_created, units = "secs"), by = user_id)) %>%
+  filter(average_timediff_view_to_goev > 0) %>% # only keep in positive differences: a person viewed event first and participated afterwards
+  group_by(user_id) %>%
+  summarize(ce_average_timediff_view_to_goev = mean(average_timediff_view_to_goev))
+```
+
+*What is the time elapse between viewing a user profile and sending a friend request?*
+```{r}
+view_prfl_frndreq_f <- inner_join(viewed_user_profile_first, friend_request_first, by= c("user_id" = "sender_id"))
+feat_view_prfl_frndreq_f <- view_prfl_frndreq_f %>%
+  group_by(user_id, receiver_id) %>%
+  summarize(average_timediff_view_to_frndreq = mean(difftime(date_created.y, date_created.x, units = "secs"), by = user_id)) %>%
+  filter(average_timediff_view_to_frndreq > 0) %>% # only keep in positive differences: a person viewed a profile first and sent request afterwards
+  group_by(user_id) %>%
+  summarize(ce_average_timediff_view_to_frndreq = mean(average_timediff_view_to_frndreq))
+```
+
+*What is the time elapse between viewing a club and participating in an event of that club?*
+```{r}
+view_club_ev_att <- inner_join(viewed_club_first, camp_ev_type, by= c("user_id", c("club_id" = "host_id")))
+feat_view_club_ev_att_f <- view_club_ev_att %>%
+  group_by(user_id, id.y) %>%
+  summarize(average_timediff_view_to_goclub = mean(difftime(date_created, checkin_time, units = "secs"), by = user_id)) %>%
+  filter(average_timediff_view_to_goclub > 0) %>% # only keep in positive differences: a person viewed a profile first and sent request afterwards
+  group_by(user_id) %>%
+  summarize(ce_average_timediff_view_to_goclub = mean(average_timediff_view_to_goclub))
+```
+
+### Network features
+```{r }
+stud_retention <- retention_clean %>% select(user_id)
+uid_subset <- stud_retention$user_id %>% unique()
+
+stud_dm <- chat_message_first %>% 
+  mutate(sender_id = as.character(sender_id),
+         receiver_id = as.character(receiver_id)) %>% 
+  filter(sender_id != 0 & receiver_id != 0)%>%
+  filter(sender_id %in% uid_subset & receiver_id %in% uid_subset)
+
+friend_req <- friend_request_first  %>% 
+  mutate(sender_id = as.character(sender_id),
+         receiver_id = as.character(receiver_id)) %>% 
+  filter(sender_id != 0 & receiver_id != 0)%>%
+  filter(sender_id %in% uid_subset & receiver_id %in% uid_subset)
+
+
+## DM Network
+student_dm_net <- stud_retention %>%
+  mutate(user_id = as.character(user_id)) %>% 
+  tbl_graph(nodes = .) %>% 
+  graph_join(
+    stud_dm %>% 
+    select(sender_id, receiver_id) %>% 
+    as_tbl_graph(), 
+    by = c("user_id" = "name")
+    )
+
+
+## Friend Requests
+friend_req_net <- stud_retention %>%
+  mutate(user_id = as.character(user_id)) %>% 
+  tbl_graph(nodes = .) %>% 
+  graph_join(friend_req %>% 
+  select(sender_id, receiver_id) %>% 
+  as_tbl_graph(), 
+  by = c("user_id" = "name"))
+
+
+## DM centrality
+dm_cent <- student_dm_net %>% 
+  activate(nodes) %>%
+  filter(!node_is_isolated()) %>%
+  mutate(.,
+         net_dm_in_degree_cent      = centrality_degree(mode = "in"),
+         net_dm_out_degree_cent      = centrality_degree(mode = "out"),
+         net_dm_eigen_centrality = centrality_eigen(),
+         net_dm_betweenness      = centrality_betweenness(),
+         net_dm_closeness        = centrality_closeness()) %N>% 
+  as_tibble()%>% mutate(user_id = as.numeric(user_id))
+
+
+## Friend Request Centrality
+friend_cent <- friend_req_net %>% 
+  activate(nodes) %>%
+  filter(!node_is_isolated()) %>%
+  mutate(.,
+         net_friend_out_degree_cent = centrality_degree(mode = "out"),
+         net_friend_in_degree_cent = centrality_degree(mode = "in"),
+         net_friend_eigen_centrality = centrality_eigen(),
+         net_friend_betweenness = centrality_betweenness(),
+         net_friend_closeness = centrality_closeness()) %>%
+  as_tibble() %>% mutate(user_id = as.numeric(user_id))
+
+## Join
+feat_net <- stud_retention %>% 
+  left_join(dm_cent) %>% 
+  left_join(friend_cent)
+
+```
+
+# Create Feature Matrix
+## with all features for app users
+```{r}
+# list of all feature sets
+featureList = ls(pattern = "feat_")
+featureList = featureList[lapply(featureList,function(x) length(grep("_rep",x,value=FALSE))) == 0] #remove unwanted dfs from list
+
+library(plyr)
+# join all dfs into a df
+feature_matrix <- join_all(list(feat_app_sess_f, feat_app_sess_f2, feat_app_sess_week_f, feat_slope_sessdur, feat_slope_totalsess,
+                                feat_all_engagement, feat_all_text,
+                                feat_camp_ev_att_f, feat_camp_ev_frnd_req_f,
+                                feat_camp_ev_type_f, feat_camp_wl_com_f, feat_camp_wl_com_like_f, feat_camp_wl_com_text_f,
+                                feat_camp_wl_post_f, feat_camp_wl_post_like_f,feat_camp_wl_post_text_f, feat_chat_message_week_f,
+                                feat_chat_msg_sgcom_f, feat_chat_msg_sgpost_f, feat_chat_msg_wlcom_f, feat_chat_msg_wlpost_f,
+                                feat_cl_camp_guide_tab_f, feat_cl_com_tab_f, feat_cl_home_tab_f, feat_cl_not_tab_f,
+                                feat_cl_prfl_tab_f, feat_cl_tile_f, feat_com_all_f, feat_comSocGrpMembr_at_event_f,
+                                feat_comSocGrpMembr_at_service_f, feat_comSocGrpMembr_f, feat_down_n_reg, feat_entropy_camp_wl_com_f,
+                                feat_engagement_week_f, feat_entropy_chat_msg_rec_f, feat_entropy_chat_msg_sent_f,
+                                feat_entropy_serv_att_f,feat_entropy_soc_grp_com_f,
+                                feat_ev_all_f, feat_ev_serv_f, feat_friends_at_event_f, feat_friends_at_service_f,
+                                feat_frnd_msg_f, feat_frnd_wlcom_f, feat_frnd_wlpost_f,feat_messages_with_friends_f,
+                                feat_perf_search_f, feat_post_com_all_ratio_f, feat_posts_all_f,
+                                feat_reg_camp_ev_f, feat_reg_frnd_f, feat_reg_soc_grp_f, feat_ret_f,
+                                feat_serv_att_f, feat_soc_grp_com_f, feat_soc_grp_com_like_f, feat_soc_grp_com_text_f,
+                                feat_soc_grp_frnd_req_f, feat_soc_grp_memb_f, feat_soc_grp_post_f, feat_soc_grp_post_like_f,
+                                feat_soc_grp_post_text_f, feat_soc_grp_ratio_f, feat_total_friends_f, feat_total_messages_f,
+                                feat_user_camp_ev_f, feat_user_campus_event_att_f, feat_view_camp_ev_att_f, feat_view_camp_ev_f,
+                                feat_view_club_ev_att_f, feat_view_club_f, feat_view_prfl_frndreq_f, feat_view_us_prfl_f,
+                                feat_slope_actions, feat_slope_mes_sent, 
+                                feat_slope_mes_rec, feat_slope_camp_guide, feat_slope_com, feat_slope_not, 
+                                feat_slope_prfl, feat_slope_tile, feat_slope_view_campev, feat_slope_view_club,
+                                feat_net) %>% 
+                             map(function(x){mutate(x, user_id = as.double(user_id))}),
+                           by = 'user_id', type = 'full')
+
+
+detach("package:plyr", unload = TRUE)
+
+# save all features for which NA is supposed to be replaced with 0
+to_be_replaced = grep(colnames(feature_matrix), pattern = "_total_", value = TRUE)
+to_be_replaced = c(to_be_replaced, grep(colnames(feature_matrix), pattern = "_mean_", value = TRUE))
+to_be_replaced = c(to_be_replaced, grep(colnames(feature_matrix), pattern = "_max_", value = TRUE))
+to_be_replaced = c(to_be_replaced, grep(colnames(feature_matrix), pattern = "_min_", value = TRUE))
+to_be_replaced = c(to_be_replaced, grep(colnames(feature_matrix), pattern = "_IQR_", value = TRUE))
+to_be_replaced = c(to_be_replaced, grep(colnames(feature_matrix), pattern = "_net_", value = TRUE))
+to_be_replaced = to_be_replaced[!grepl(pattern = "_mean_rat", to_be_replaced)] #remove mean ratings again, those are supposed to be imputed later
+to_be_replaced = to_be_replaced[!grepl(pattern = "_max_rat", to_be_replaced)]
+to_be_replaced = to_be_replaced[!grepl(pattern = "_min_rat", to_be_replaced)]
+to_be_replaced = to_be_replaced[!grepl(pattern = "_ratio_", to_be_replaced)]
+
+# replace NAs in selected features with zeros
+feature_matrix[to_be_replaced][is.na(feature_matrix[to_be_replaced])] = 0
+# replace NAs in logical features with FALSE
+feature_matrix <- tidyr::replace_na(feature_matrix, list(
+  ae_app_before_firstterm = FALSE,
+  ae_app_first_winter = FALSE))
+
+feature_matrix$institution <- "uni_1"
+
+# save matrix as new csv file
+write.csv(feature_matrix,'../../Prep Data/feat_mat_uni_1.csv')
+
+```
+
+
+```{r}
+list(feat_app_sess_f, feat_app_sess_f2, feat_app_sess_week_f, feat_slope_sessdur, feat_slope_totalsess,
+                                feat_all_engagement, feat_all_text,
+                                feat_camp_ev_att_f, feat_camp_ev_frnd_req_f,
+                                feat_camp_ev_type_f, feat_camp_wl_com_f, feat_camp_wl_com_like_f, feat_camp_wl_com_text_f,
+                                feat_camp_wl_post_f, feat_camp_wl_post_like_f,feat_camp_wl_post_text_f, feat_chat_message_week_f,
+                                feat_chat_msg_sgcom_f, feat_chat_msg_sgpost_f, feat_chat_msg_wlcom_f, feat_chat_msg_wlpost_f,
+                                feat_cl_camp_guide_tab_f, feat_cl_com_tab_f, feat_cl_home_tab_f, feat_cl_not_tab_f,
+                                feat_cl_prfl_tab_f, feat_cl_tile_f, feat_com_all_f, feat_comSocGrpMembr_at_event_f,
+                                feat_comSocGrpMembr_at_service_f, feat_comSocGrpMembr_f, feat_down_n_reg, feat_entropy_camp_wl_com_f,
+                                feat_engagement_week_f, feat_entropy_chat_msg_rec_f, feat_entropy_chat_msg_sent_f,
+                                feat_entropy_serv_att_f,feat_entropy_soc_grp_com_f,
+                                feat_ev_all_f, feat_ev_serv_f, feat_friends_at_event_f, feat_friends_at_service_f,
+                                feat_frnd_msg_f, feat_frnd_wlcom_f, feat_frnd_wlpost_f,feat_messages_with_friends_f,
+                                feat_perf_search_f, feat_post_com_all_ratio_f, feat_posts_all_f,
+                                feat_reg_camp_ev_f, feat_reg_frnd_f, feat_reg_soc_grp_f, feat_ret_f,
+                                feat_serv_att_f, feat_soc_grp_com_f, feat_soc_grp_com_like_f, feat_soc_grp_com_text_f,
+                                feat_soc_grp_frnd_req_f, feat_soc_grp_memb_f, feat_soc_grp_post_f, feat_soc_grp_post_like_f,
+                                feat_soc_grp_post_text_f, feat_soc_grp_ratio_f, feat_total_friends_f, feat_total_messages_f,
+                                feat_user_camp_ev_f, feat_user_campus_event_att_f, feat_view_camp_ev_att_f, feat_view_camp_ev_f,
+                                feat_view_club_ev_att_f, feat_view_club_f, feat_view_prfl_frndreq_f, feat_view_us_prfl_f,
+                                feat_slope_actions, feat_slope_mes_sent, 
+                                feat_slope_mes_rec, feat_slope_camp_guide, feat_slope_com, feat_slope_not, 
+                                feat_slope_prfl, feat_slope_tile, feat_slope_view_campev, feat_slope_view_club,
+                                feat_net) %>% map(function(x){mutate(x, user_id = as.double(user_id))})
+
+
+
+feature_matrix %>% tail(50)
+
+union(feat_net$user_id, feat_down_n_reg$user_id) %>% length()
+
+# something is wrong with down_n_reg
+
+
+
+
+feature_matrix %>% filter(is.na(status))
+
+```
+
+```{r}
+feat_entropy_chat_msg_rec_f
+
+feat_frnd_msg_f
+
+intersect(feat_entropy_chat_msg_rec_f$user_id, feat_app_sess_f2$user_id) %>% length()
+
+
+
+```
+
+
+# List of data set abbreviations
+
+Original data set name        | Abbreviation
+------------------------------|------------------------------
+app_session                   | app_sess
+campus_wall_post              | camp_wl_post
+campus_wall_post_like         | camp_wl_post_like
+campus_wall_comment           | camp_wl_com
+campus_wall_comment_like      | camp_wl_com_like
+chat_message (sent)           | chat_msg_sent
+chat_message (received)       | chat_msg_rec
+clicked_campus_guide_tab      | cl_camp_guide_tab
+clicked_community_tab         | cl_com_tab
+clicked_home_tab              | cl_home_tab
+clicked_notifications_tab     | cl_not_tab
+clicked_profile_tab           | cl_prfl_tab
+clicked_tile                  | cl_tile
+download_and_registration     | down_n_reg
+campus_event_attendance       | camp_ev_att
+friend_request (received)     | frnd_req_rec
+friend_request (sent)         | frnd_req_sent
+orientation_event_attendance  | or_ev_att
+performed_search              | perf_search
+service_attendance            | serv_att
+social_group_member           | soc_grp_memb
+social_group_post             | soc_grp_post
+social_group_post_like        | soc_grp_post_like
+social_group_comment          | soc_grp_com
+social_group_comment_like     | soc_grp_com_like
+user_added_course             | add_cour
+user_campus_event             | camp_ev
+user_retention_data           | ret
+viewed_campus_event           | view_camp_ev
+viewed_club                   | view_club
+viewed_user_profile           | view_us_prfl
+
+# References
+Mohammad, S. M., & Turney, P. D. (2013). Crowdsourcing a word–emotion association lexicon. Computational Intelligence, 29(3), 436-465.
